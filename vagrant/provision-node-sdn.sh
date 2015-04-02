@@ -8,10 +8,12 @@ pushd $HOME
 if [ -d openshift-sdn ]; then
     cd openshift-sdn
     git fetch origin
-    git reset --hard origin/master
+    git checkout dcbw/ipvlan
+    git reset --hard origin/dcbw/ipvlan
 else
-    git clone https://github.com/openshift/openshift-sdn
+    git clone https://github.com/dcbw/openshift-sdn.git
     cd openshift-sdn
+    git checkout dcbw/ipvlan
 fi
 
 make clean
@@ -28,7 +30,7 @@ After=openvswitch.service
 Before=openshift-node.service
 
 [Service]
-ExecStart=/usr/bin/openshift-sdn -minion -etcd-endpoints=https://${MASTER_IP}:4001 -public-ip=${MINION_IP} -etcd-keyfile=${ETCD_KEYFILE} -etcd-certfile=${ETCD_CERTFILE} -etcd-cafile=${ETCD_CAFILE}
+ExecStart=/usr/bin/openshift-sdn -minion -kubenet=ipvlan-l2 -etcd-endpoints=https://${MASTER_IP}:4001 -public-ip=${MINION_IP} -etcd-keyfile=${ETCD_KEYFILE} -etcd-certfile=${ETCD_CERTFILE} -etcd-cafile=${ETCD_CAFILE}
 
 [Install]
 WantedBy=multi-user.target

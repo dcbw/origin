@@ -43,11 +43,18 @@ node_list=${node_list:1}
 yum -y install deltarpm
 
 # Install the required packages
+pushd /etc/yum.repos.d/
+  if [ ! -f ipvlan-f20.repo ]; then
+    wget -q http://people.redhat.com/dcbw/ipvlan-f20/ipvlan-f20.repo
+  fi
+  yum -y --disablerepo=* --enablerepo=ipvlan-f20 upgrade
+popd
 yum install -y docker-io git golang e2fsprogs hg net-tools bridge-utils which
 
 # Build openshift
 echo "Building openshift"
-pushd /vagrant
+cp -r /vagrant /tmp
+pushd /tmp/vagrant
   ./hack/build-go.sh
   cp _output/local/go/bin/openshift /usr/bin
   ./hack/install-etcd.sh
@@ -77,6 +84,7 @@ pushd /vagrant
       --node="${minion}" \
       --hostnames="${minion},${ip}" \
       --master="https://${MASTER_IP}:8443" \
+      --network-plugin=redhat/openshift-ipvlan-subnet \
       --node-client-certificate-authority="${CERT_DIR}/ca.crt" \
       --certificate-authority="${CERT_DIR}/ca.crt" \
       --signer-cert="${CERT_DIR}/ca.crt" \
