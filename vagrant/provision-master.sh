@@ -5,6 +5,24 @@ source $(dirname $0)/provision-config.sh
 
 OPENSHIFT_SDN=$4
 
+NETWORK_CONF_PATH=/etc/sysconfig/network-scripts/
+
+rm -f ${NETWORK_CONF_PATH}ifcfg-enp*
+
+sed -i '/NM_CONTROLLED=no/d' ${NETWORK_CONF_PATH}ifcfg-eth0
+sed -i 's/DEVICE=eth0/DEVICE=eth1/' ${NETWORK_CONF_PATH}ifcfg-eth0
+mv ${NETWORK_CONF_PATH}ifcfg-eth0 ${NETWORK_CONF_PATH}ifcfg-eth1
+
+cat <<EOF > ${NETWORK_CONF_PATH}ifcfg-eth0
+DEVICE=eth0
+ONBOOT=yes
+TYPE=Ethernet
+BOOTPROTO=dhcp
+IPV6INIT=yes
+EOF
+
+rm -f /var/lib/NetworkManager/*.lease
+
 # Setup hosts file to support ping by hostname to each minion in the cluster from apiserver
 node_list=""
 minion_ip_array=(${MINION_IPS//,/ })
@@ -21,6 +39,8 @@ if ! grep ${MASTER_IP} /etc/hosts; then
   echo "${MASTER_IP} ${MASTER_NAME}" >> /etc/hosts
 fi
 node_list=${node_list:1}
+
+yum -y install deltarpm
 
 # Install the required packages
 yum install -y docker-io git golang e2fsprogs hg net-tools bridge-utils which
