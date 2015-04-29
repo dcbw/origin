@@ -41,6 +41,7 @@ type CreateNodeConfigOptions struct {
 	DNSDomain           string
 	DNSIP               string
 	ListenAddr          flagtypes.Addr
+	NetworkPluginName   string
 
 	ClientCertFile   string
 	ClientKeyFile    string
@@ -86,6 +87,7 @@ func NewCommandNodeConfig(commandName string, fullName string, out io.Writer) *c
 	flags.StringVar(&options.DNSDomain, "dns-domain", options.DNSDomain, "DNS domain for the cluster.")
 	flags.StringVar(&options.DNSIP, "dns-ip", options.DNSIP, "DNS server IP for the cluster.")
 	flags.Var(&options.ListenAddr, "listen", "The address to listen for connections on (scheme://host:port).")
+	flags.StringVar(&options.NetworkPluginName, "network-plugin", options.NetworkPluginName, "The network plugin to be called for configuring networking for pods.")
 
 	flags.StringVar(&options.ClientCertFile, "client-certificate", "", "The client cert file for the node to contact the API.")
 	flags.StringVar(&options.ClientKeyFile, "client-key", "", "The client key file for the node to contact the API.")
@@ -358,6 +360,7 @@ func (o CreateNodeConfigOptions) MakeNodeConfig(serverCertFile, serverKeyFile, n
 
 		DNSDomain: o.DNSDomain,
 		DNSIP:     o.DNSIP,
+		NetworkPluginName: o.NetworkPluginName,
 
 		MasterKubeConfig: kubeConfigFile,
 	}
