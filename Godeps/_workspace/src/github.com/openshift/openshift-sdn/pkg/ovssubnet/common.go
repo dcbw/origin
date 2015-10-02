@@ -1,9 +1,11 @@
 package ovssubnet
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
+	"path"
 	"strings"
 	"time"
 
@@ -13,6 +15,9 @@ import (
 	"github.com/openshift/openshift-sdn/pkg/ovssubnet/api"
 	"github.com/openshift/openshift-sdn/pkg/ovssubnet/controller/kube"
 	"github.com/openshift/openshift-sdn/pkg/ovssubnet/controller/multitenant"
+	"github.com/openshift/openshift-sdn/pkg/ovssubnet/controller/flannelsdn"
+
+	"github.com/coreos/go-etcd/etcd"
 )
 
 const (
@@ -32,6 +37,7 @@ type OvsController struct {
 	VNIDMap         map[string]uint
 	netIDManager    *netutils.NetIDAllocator
 	AdminNamespaces []string
+	etcdClient      *etcd.Client
 }
 
 type FlowController interface {
@@ -43,7 +49,7 @@ type FlowController interface {
 }
 
 func NewKubeController(sub api.SubnetRegistry, hostname string, selfIP string, ready chan struct{}) (*OvsController, error) {
-	kubeController, err := NewController(sub, hostname, selfIP, ready)
+	kubeController, err := NewController(sub, nil, hostname, selfIP, ready)
 	if err == nil {
 		kubeController.flowController = kube.NewFlowController()
 	}
@@ -51,14 +57,22 @@ func NewKubeController(sub api.SubnetRegistry, hostname string, selfIP string, r
 }
 
 func NewMultitenantController(sub api.SubnetRegistry, hostname string, selfIP string, ready chan struct{}) (*OvsController, error) {
-	mtController, err := NewController(sub, hostname, selfIP, ready)
+	mtController, err := NewController(sub, nil, hostname, selfIP, ready)
 	if err == nil {
 		mtController.flowController = multitenant.NewFlowController()
 	}
 	return mtController, err
 }
 
-func NewController(sub api.SubnetRegistry, hostname string, selfIP string, ready chan struct{}) (*OvsController, error) {
+func NewFlannelSDNController(sub api.SubnetRegistry, etcdClient *etcd.Client, hostname string, selfIP string, ready chan struct{}) (*OvsController, error) {
+	fsController, err := NewController(sub, etcdClient, hostname, selfIP, ready)
+	if err == nil {
+		fsController.flowController = flannelsdn.NewFlowController()
+	}
+	return fsController, err
+}
+
+func NewController(sub api.SubnetRegistry, etcdClient *etcd.Client, hostname string, selfIP string, ready chan struct{}) (*OvsController, error) {
 	if selfIP == "" {
 		var err error
 		selfIP, err = GetNodeIP(hostname)
@@ -77,6 +91,7 @@ func NewController(sub api.SubnetRegistry, hostname string, selfIP string, ready
 		sig:             make(chan struct{}),
 		ready:           ready,
 		AdminNamespaces: make([]string, 0),
+		etcdClient:      etcdClient,
 	}, nil
 }
 
@@ -87,91 +102,70 @@ func (oc *OvsController) StartMaster(sync bool, clusterNetworkCIDR string, clust
 		log.Errorf("Etcd not running?")
 		return errors.New("Etcd not reachable. Sync cluster check failed.")
 	}
-	// initialize the node key
-	if sync {
-		err := oc.subnetRegistry.InitNodes()
-		if err != nil {
-			log.Infof("Node path already initialized.")
-		}
+
+	nets, _, err := oc.subnetRegistry.GetNetNamespaces()
+	if err != nil {
+		return err
+	}
+	inUse := make([]uint, 0)
+	for _, net := range nets {
+		inUse = append(inUse, net.NetID)
+		oc.VNIDMap[net.Name] = net.NetID
+	}
+	// VNID: 0 reserved for default namespace and can reach any network in the cluster
+	// VNID: 1 to 9 are internally reserved for any special cases in the future
+	oc.netIDManager, err = netutils.NewNetIDAllocator(10, MaxVNID, inUse)
+	if err != nil {
+		return err
 	}
 
-	// initialize the subnet key?
-	oc.subnetRegistry.InitSubnets()
+	result, err := oc.watchAndGetResource("Namespace")
+	if err != nil {
+		return err
+	}
+	namespaces := result.([]string)
+
 	subrange := make([]string, 0)
-	subnets, _, err := oc.subnetRegistry.GetSubnets()
-	if err != nil {
-		log.Errorf("Error in initializing/fetching subnets: %v", err)
-		return err
-	}
-	for _, sub := range subnets {
-		subrange = append(subrange, sub.SubnetCIDR)
-	}
-
-	err = oc.subnetRegistry.WriteNetworkConfig(clusterNetworkCIDR, clusterBitsPerSubnet, serviceNetworkCIDR)
-	if err != nil {
-		return err
-	}
-
-	oc.subnetAllocator, err = netutils.NewSubnetAllocator(clusterNetworkCIDR, clusterBitsPerSubnet, subrange)
-	if err != nil {
-		return err
-	}
-
-	result, err := oc.watchAndGetResource("Node")
-	if err != nil {
-		return err
-	}
-	nodes := result.([]api.Node)
-	err = oc.serveExistingNodes(nodes)
-	if err != nil {
-		return err
-	}
-
-	if _, is_mt := oc.flowController.(*multitenant.FlowController); is_mt {
-		nets, _, err := oc.subnetRegistry.GetNetNamespaces()
-		if err != nil {
-			return err
-		}
-		inUse := make([]uint, 0)
-		for _, net := range nets {
-			inUse = append(inUse, net.NetID)
-			oc.VNIDMap[net.Name] = net.NetID
-		}
-		// VNID: 0 reserved for default namespace and can reach any network in the cluster
-		// VNID: 1 to 9 are internally reserved for any special cases in the future
-		oc.netIDManager, err = netutils.NewNetIDAllocator(10, MaxVNID, inUse)
-		if err != nil {
-			return err
+	log.Errorf("######## namespaces %v", namespaces)
+	// Get existing network allocations
+	for _, nsName := range namespaces {
+		net, err := getFlannelNetwork(oc.etcdClient, nsName)
+		if net == nil || err != nil {
+			log.Errorf("Unusable network '%s': %v", nsName, err)
+			continue
 		}
 
-		result, err := oc.watchAndGetResource("Namespace")
-		if err != nil {
-			return err
-		}
-		namespaces := result.([]string)
-		// Handle existing namespaces without VNID
-		for _, nsName := range namespaces {
-			// Skip admin namespaces, they will have VNID: 0
-			if oc.isAdminNamespace(nsName) {
-				// Revoke VNID if already exists
-				if _, ok := oc.VNIDMap[nsName]; ok {
-					err := oc.revokeVNID(nsName)
-					if err != nil {
-						return err
-					}
-				}
-				continue
-			}
-			// Skip if VNID already exists for the namespace
+		subrange = append(subrange, net.Network)
+	}
+
+	oc.subnetAllocator, err = netutils.NewSubnetAllocator("10.0.0.0/8", 16, subrange)
+	if err != nil {
+		return err
+	}
+
+	// Handle existing namespaces without VNID
+	for _, nsName := range namespaces {
+		// Skip admin namespaces, they will have VNID: 0
+		if oc.isAdminNamespace(nsName) {
+			// Revoke VNID if already exists
 			if _, ok := oc.VNIDMap[nsName]; ok {
-				continue
+				err := oc.revokeVNID(nsName)
+				if err != nil {
+					return err
+				}
 			}
-			err := oc.assignVNID(nsName)
-			if err != nil {
-				return err
-			}
+			continue
+		}
+		// Skip if VNID already exists for the namespace
+		if _, ok := oc.VNIDMap[nsName]; ok {
+			continue
+		}
+		err := oc.assignVNID(nsName)
+		if err != nil {
+			return err
 		}
 	}
+
 	return nil
 }
 
@@ -182,6 +176,86 @@ func (oc *OvsController) isAdminNamespace(nsName string) bool {
 		}
 	}
 	return false
+}
+
+type FlannelNetwork struct {
+	Network     string
+	SubnetLen   uint
+	SdnConfig   FlannelSdnConfig `json:"Backend"`
+}
+
+type FlannelSdnConfig struct {
+	Type string
+	VNI  uint
+}
+
+func getFlannelNetwork(etcdClient *etcd.Client, name string) (*FlannelNetwork, error) {
+	key := path.Join("/coreos.com/network", name, "config")
+	resp, err := etcdClient.Get(key, false, false)
+	if err != nil {
+		if e, ok := err.(*etcd.EtcdError); ok {
+			if e.ErrorCode == 100 {
+				return nil, nil
+			}
+		}
+		return nil, err
+	}
+
+	n := new(FlannelNetwork)
+	err = json.Unmarshal([]byte(resp.Node.Value), n)
+	if err != nil {
+		return nil, err
+	}
+
+	_, _, err = net.ParseCIDR(n.Network)
+	if err != nil {
+		return nil, err
+	}
+	if n.SdnConfig.Type != "ovs" {
+		return nil, fmt.Errorf("Unexpected flannel network type '%s'", n.SdnConfig.Type)
+	}
+
+	return n, nil
+}
+
+func (oc *OvsController) updateFlannelNetwork(name string, vnid uint) error {
+	found, err := getFlannelNetwork(oc.etcdClient, name)
+	if err != nil {
+		return err
+	} else if found != nil {
+		if found.SdnConfig.VNI != vnid {
+			return fmt.Errorf("Network '%s' didn't match flannel network vnid %d (expected %d)", name, found.SdnConfig.VNI, vnid)
+		}
+		if found.SdnConfig.Type != "ovs" {
+			return fmt.Errorf("Network '%s' already defined as backend type %s", name, found.SdnConfig.Type)
+		}
+	}
+
+	sn, err := oc.subnetAllocator.GetNetwork()
+	if err != nil {
+		log.Errorf("Error creating subnet for network %s.", name)
+		return err
+	}
+
+	var sdnConfig = FlannelSdnConfig{ "ovs", vnid }
+	net := FlannelNetwork{
+		Network:   sn.String(),
+		SubnetLen: 24,
+		SdnConfig: sdnConfig,
+	}
+	netMessage, err := json.Marshal(net)
+	if err != nil {
+		return err
+	}
+
+	key := path.Join("/coreos.com/network", name, "config")
+	log.Infof("##### Adding flannel network %s key %s config '%s'", name, key, string(netMessage))
+	_, err = oc.etcdClient.Set(key, string(netMessage), 0)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func (oc *OvsController) assignVNID(namespaceName string) error {
@@ -200,12 +274,42 @@ func (oc *OvsController) assignVNID(namespaceName string) error {
 			return err
 		}
 		oc.VNIDMap[namespaceName] = netid
+
+		err = oc.updateFlannelNetwork(namespaceName, netid)
+		if err != nil {
+			log.Error("Error adding flannel network for %s/%d: %v", namespaceName, netid, err)
+		}
 	}
 	return nil
 }
 
+func (oc *OvsController) removeFlannelNetwork(name string) error {
+	found, err := getFlannelNetwork(oc.etcdClient, name)
+	if found != nil {
+		_, ipnet, err := net.ParseCIDR(found.Network)
+		if err == nil {
+			oc.subnetAllocator.ReleaseNetwork(ipnet)
+		}
+	}
+
+	key := path.Join("/coreos.com/network", name, "config")
+	_, err = oc.etcdClient.Delete(key, false)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func (oc *OvsController) revokeVNID(namespaceName string) error {
-	err := oc.subnetRegistry.DeleteNetNamespace(namespaceName)
+	log.Infof("Revoking network %s.", namespaceName)
+
+	err := oc.removeFlannelNetwork(namespaceName)
+	if err != nil {
+		log.Errorf("Failed to delete flannel network '%s': %v", namespaceName, err)
+	}
+
+	err = oc.subnetRegistry.DeleteNetNamespace(namespaceName)
 	if err != nil {
 		return err
 	}
@@ -250,122 +354,29 @@ func (oc *OvsController) watchNetworks(ready chan<- bool, start <-chan string) {
 	}
 }
 
-func (oc *OvsController) serveExistingNodes(nodes []api.Node) error {
-	for _, node := range nodes {
-		_, err := oc.subnetRegistry.GetSubnet(node.Name)
-		if err == nil {
-			// subnet already exists, continue
-			continue
-		}
-		err = oc.AddNode(node.Name, node.IP)
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (oc *OvsController) AddNode(nodeName string, nodeIP string) error {
-	sn, err := oc.subnetAllocator.GetNetwork()
-	if err != nil {
-		log.Errorf("Error creating network for node %s.", nodeName)
-		return err
-	}
-
-	if nodeIP == "" || nodeIP == "127.0.0.1" {
-		return fmt.Errorf("Invalid node IP")
-	}
-
-	subnet := &api.Subnet{
-		NodeIP:     nodeIP,
-		SubnetCIDR: sn.String(),
-	}
-	err = oc.subnetRegistry.CreateSubnet(nodeName, subnet)
-	if err != nil {
-		log.Errorf("Error writing subnet to etcd for node %s: %v", nodeName, sn)
-		return err
-	}
-	return nil
-}
-
-func (oc *OvsController) DeleteNode(nodeName string) error {
-	sub, err := oc.subnetRegistry.GetSubnet(nodeName)
-	if err != nil {
-		log.Errorf("Error fetching subnet for node %s for delete operation.", nodeName)
-		return err
-	}
-	_, ipnet, err := net.ParseCIDR(sub.SubnetCIDR)
-	if err != nil {
-		log.Errorf("Error parsing subnet for node %s for deletion: %s", nodeName, sub.SubnetCIDR)
-		return err
-	}
-	oc.subnetAllocator.ReleaseNetwork(ipnet)
-	return oc.subnetRegistry.DeleteSubnet(nodeName)
-}
-
-func (oc *OvsController) syncWithMaster() error {
-	return oc.subnetRegistry.CreateNode(oc.hostName, oc.localIP)
-}
-
 func (oc *OvsController) StartNode(sync, skipsetup bool, mtu uint) error {
-	if sync {
-		err := oc.syncWithMaster()
-		if err != nil {
-			log.Errorf("Failed to register with master: %v", err)
-			return err
-		}
-	}
-	err := oc.initSelfSubnet()
-	if err != nil {
-		log.Errorf("Failed to get subnet for this host: %v", err)
-		return err
-	}
-
 	// call flow controller's setup
-	if !skipsetup {
-		// Assume we are working with IPv4
-		clusterNetworkCIDR, err := oc.subnetRegistry.GetClusterNetworkCIDR()
-		if err != nil {
-			log.Errorf("Failed to obtain ClusterNetwork: %v", err)
-			return err
-		}
-		servicesNetworkCIDR, err := oc.subnetRegistry.GetServicesNetworkCIDR()
-		if err != nil {
-			log.Errorf("Failed to obtain ServicesNetwork: %v", err)
-			return err
-		}
-		err = oc.flowController.Setup(oc.localSubnet.SubnetCIDR, clusterNetworkCIDR, servicesNetworkCIDR, mtu)
-		if err != nil {
-			return err
-		}
-	}
-
-	result, err := oc.watchAndGetResource("HostSubnet")
+	err := oc.flowController.Setup("", "", "", 0)
 	if err != nil {
 		return err
 	}
-	subnets := result.([]api.Subnet)
-	for _, s := range subnets {
-		oc.flowController.AddOFRules(s.NodeIP, s.SubnetCIDR, oc.localIP)
-	}
-	if _, ok := oc.flowController.(*multitenant.FlowController); ok {
-		result, err := oc.watchAndGetResource("NetNamespace")
-		if err != nil {
-			return err
-		}
-		nslist := result.([]api.NetNamespace)
-		for _, ns := range nslist {
-			oc.VNIDMap[ns.Name] = ns.NetID
-		}
 
-		result, err = oc.watchAndGetResource("Service")
-		if err != nil {
-			return err
-		}
-		services := result.([]api.Service)
-		for _, svc := range services {
-			oc.flowController.AddServiceOFRules(oc.VNIDMap[svc.Namespace], svc.IP, svc.Protocol, svc.Port)
-		}
+	result, err := oc.watchAndGetResource("NetNamespace")
+	if err != nil {
+		return err
+	}
+	nslist := result.([]api.NetNamespace)
+	for _, ns := range nslist {
+		oc.VNIDMap[ns.Name] = ns.NetID
+	}
+
+	result, err = oc.watchAndGetResource("Service")
+	if err != nil {
+		return err
+	}
+	services := result.([]api.Service)
+	for _, svc := range services {
+		oc.flowController.AddServiceOFRules(oc.VNIDMap[svc.Namespace], svc.IP, svc.Protocol, svc.Port)
 	}
 
 	if oc.ready != nil {
@@ -395,61 +406,6 @@ func (oc *OvsController) watchVnids(ready chan<- bool, start <-chan string) {
 	}
 }
 
-func (oc *OvsController) initSelfSubnet() error {
-	// get subnet for self
-	for {
-		sub, err := oc.subnetRegistry.GetSubnet(oc.hostName)
-		if err != nil {
-			log.Errorf("Could not find an allocated subnet for node %s: %s. Waiting...", oc.hostName, err)
-			time.Sleep(2 * time.Second)
-			continue
-		}
-		oc.localSubnet = sub
-		return nil
-	}
-}
-
-func (oc *OvsController) watchNodes(ready chan<- bool, start <-chan string) {
-	stop := make(chan bool)
-	nodeEvent := make(chan *api.NodeEvent)
-	go oc.subnetRegistry.WatchNodes(nodeEvent, ready, start, stop)
-	for {
-		select {
-		case ev := <-nodeEvent:
-			switch ev.Type {
-			case api.Added:
-				sub, err := oc.subnetRegistry.GetSubnet(ev.Node.Name)
-				if err != nil {
-					// subnet does not exist already
-					oc.AddNode(ev.Node.Name, ev.Node.IP)
-				} else {
-					// Current node IP is obtained from event, ev.NodeIP to
-					// avoid cached/stale IP lookup by net.LookupIP()
-					if sub.NodeIP != ev.Node.IP {
-						err = oc.subnetRegistry.DeleteSubnet(ev.Node.Name)
-						if err != nil {
-							log.Errorf("Error deleting subnet for node %s, old ip %s", ev.Node.Name, sub.NodeIP)
-							continue
-						}
-						sub.NodeIP = ev.Node.IP
-						err = oc.subnetRegistry.CreateSubnet(ev.Node.Name, sub)
-						if err != nil {
-							log.Errorf("Error creating subnet for node %s, ip %s", ev.Node.Name, sub.NodeIP)
-							continue
-						}
-					}
-				}
-			case api.Deleted:
-				oc.DeleteNode(ev.Node.Name)
-			}
-		case <-oc.sig:
-			log.Error("Signal received. Stopping watching of nodes.")
-			stop <- true
-			return
-		}
-	}
-}
-
 func (oc *OvsController) watchServices(ready chan<- bool, start <-chan string) {
 	stop := make(chan bool)
 	svcevent := make(chan *api.ServiceEvent)
@@ -466,28 +422,6 @@ func (oc *OvsController) watchServices(ready chan<- bool, start <-chan string) {
 			}
 		case <-oc.sig:
 			log.Error("Signal received. Stopping watching of services.")
-			stop <- true
-			return
-		}
-	}
-}
-
-func (oc *OvsController) watchCluster(ready chan<- bool, start <-chan string) {
-	stop := make(chan bool)
-	clusterEvent := make(chan *api.SubnetEvent)
-	go oc.subnetRegistry.WatchSubnets(clusterEvent, ready, start, stop)
-	for {
-		select {
-		case ev := <-clusterEvent:
-			switch ev.Type {
-			case api.Added:
-				// add openflow rules
-				oc.flowController.AddOFRules(ev.Subnet.NodeIP, ev.Subnet.SubnetCIDR, oc.localIP)
-			case api.Deleted:
-				// delete openflow rules meant for the node
-				oc.flowController.DelOFRules(ev.Subnet.NodeIP, oc.localIP)
-			}
-		case <-oc.sig:
 			stop <- true
 			return
 		}
@@ -556,14 +490,6 @@ func (oc *OvsController) watchAndGetResource(resourceName string) (interface{}, 
 	var err error
 
 	switch strings.ToLower(resourceName) {
-	case "hostsubnet":
-		go oc.watchCluster(ready, start)
-		waitForWatchReadiness(ready, resourceName)
-		getOutput, version, err = oc.subnetRegistry.GetSubnets()
-	case "node":
-		go oc.watchNodes(ready, start)
-		waitForWatchReadiness(ready, resourceName)
-		getOutput, version, err = oc.subnetRegistry.GetNodes()
 	case "namespace":
 		go oc.watchNetworks(ready, start)
 		waitForWatchReadiness(ready, resourceName)
