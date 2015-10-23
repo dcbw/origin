@@ -14,7 +14,7 @@ import (
 	"github.com/openshift/openshift-sdn/plugins/osdn"
 	"github.com/openshift/openshift-sdn/plugins/osdn/flatsdn"
 	"github.com/openshift/openshift-sdn/plugins/osdn/multitenant"
-	"github.com/openshift/openshift-sdn/plugins/osdn/flannel-multitenant"
+	"github.com/openshift/openshift-sdn/plugins/osdn/flannelmt"
 	"github.com/openshift/origin/pkg/cmd/server/kubernetes"
 	kerrors "k8s.io/kubernetes/pkg/api/errors"
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
@@ -265,12 +265,12 @@ func RunSDNController(config *kubernetes.NodeConfig, nodeConfig configapi.NodeCo
 		config.KubeletConfig.NetworkPlugins = append(config.KubeletConfig.NetworkPlugins, plugin)
 		go multitenant.Node(registry, nodeConfig.NodeName, nodeConfig.NodeIP, ch, plugin, nodeConfig.NetworkConfig.MTU)
 		return registry
-	case flannel-multitenant.NetworkPluginName():
+	case flannelmt.NetworkPluginName():
 		ch := make(chan struct{})
 		config.KubeletConfig.StartUpdates = ch
-		plugin := flannel-multitenant.GetKubeNetworkPlugin()
+		plugin := flannelmt.GetKubeNetworkPlugin()
 		config.KubeletConfig.NetworkPlugins = append(config.KubeletConfig.NetworkPlugins, plugin)
-		go flannel-multitenant.Node(registry, nodeConfig.NodeName, nodeConfig.NodeIP, ch, plugin, nodeConfig.NetworkConfig.MTU)
+		go flannelmt.Node(registry, nodeConfig.NodeName, nodeConfig.NodeIP, ch, plugin, nodeConfig.NetworkConfig.MTU)
 		return registry
 	}
 	return nil

@@ -12,6 +12,7 @@ import (
 	"github.com/openshift/openshift-sdn/pkg/ovssubnet/api"
 	"github.com/openshift/openshift-sdn/pkg/ovssubnet/controller/kube"
 	"github.com/openshift/openshift-sdn/pkg/ovssubnet/controller/multitenant"
+	"github.com/openshift/openshift-sdn/pkg/ovssubnet/controller/flannelmt"
 
 	utildbus "k8s.io/kubernetes/pkg/util/dbus"
 	kexec "k8s.io/kubernetes/pkg/util/exec"
@@ -65,6 +66,14 @@ func NewMultitenantController(sub api.SubnetRegistry, hostname string, selfIP st
 		mtController.flowController = multitenant.NewFlowController()
 	}
 	return mtController, err
+}
+
+func NewFlannelMtController(sub api.SubnetRegistry, hostname string, selfIP string, ready chan struct{}) (*OvsController, error) {
+	fmtController, err := NewController(sub, hostname, selfIP, ready)
+	if err == nil {
+		fmtController.flowController = flannelmt.NewFlowController()
+	}
+	return fmtController, err
 }
 
 func NewController(sub api.SubnetRegistry, hostname string, selfIP string, ready chan struct{}) (*OvsController, error) {
