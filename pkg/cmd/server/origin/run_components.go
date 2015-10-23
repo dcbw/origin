@@ -39,6 +39,7 @@ import (
 	"github.com/openshift/openshift-sdn/plugins/osdn"
 	"github.com/openshift/openshift-sdn/plugins/osdn/flatsdn"
 	"github.com/openshift/openshift-sdn/plugins/osdn/multitenant"
+	"github.com/openshift/openshift-sdn/plugins/osdn/flannel-multitenant"
 	configapi "github.com/openshift/origin/pkg/cmd/server/api"
 	"github.com/openshift/origin/pkg/cmd/server/bootstrappolicy"
 	serviceaccountcontrollers "github.com/openshift/origin/pkg/serviceaccounts/controllers"
@@ -336,6 +337,8 @@ func (c *MasterConfig) RunSDNController() {
 		flatsdn.Master(registry, c.Options.NetworkConfig.ClusterNetworkCIDR, c.Options.NetworkConfig.HostSubnetLength, c.Options.NetworkConfig.ServiceNetworkCIDR)
 	case multitenant.NetworkPluginName():
 		multitenant.Master(registry, c.Options.NetworkConfig.ClusterNetworkCIDR, c.Options.NetworkConfig.HostSubnetLength, c.Options.NetworkConfig.ServiceNetworkCIDR)
+	case flannel-multitenant.NetworkPluginName():
+		flannel-multitenant.Master(registry, c.Options.NetworkConfig.ClusterNetworkCIDR, c.Options.NetworkConfig.HostSubnetLength, c.Options.NetworkConfig.ServiceNetworkCIDR)
 	}
 }
 
