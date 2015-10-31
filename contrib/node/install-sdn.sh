@@ -14,11 +14,11 @@ os::provision::install-sdn() {
   local osdn_plugin_path="${osdn_base_path}/plugins/osdn"
   mkdir -p "${target}/bin/"
   pushd "${osdn_plugin_path}" > /dev/null
-    cp -f flatsdn/bin/openshift-ovs-subnet "${target}/bin/"
-    cp -f flatsdn/bin/openshift-sdn-kube-subnet-setup.sh "${target}/bin/"
+    cp -f ovs/bin/openshift-sdn-ovs "${target}/bin/"
+    cp -f ovs/bin/openshift-sdn-ovs-setup.sh "${target}/bin/"
 
-    cp -f multitenant/bin/openshift-ovs-multitenant "${target}/bin/"
-    cp -f multitenant/bin/openshift-sdn-multitenant-setup.sh "${target}/bin/"
+    cp -f flannelmt/bin/openshift-sdn-flannelmt "${target}/bin/"
+    cp -f flannelmt/bin/openshift-sdn-flannelmt-setup.sh "${target}/bin/"
   popd > /dev/null
 
   # subnet and multitenant plugin setup writes docker network options

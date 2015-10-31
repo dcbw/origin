@@ -162,10 +162,12 @@ os::provision::get-network-plugin() {
 
   local subnet_plugin="redhat/openshift-ovs-subnet"
   local multitenant_plugin="redhat/openshift-ovs-multitenant"
+  local flannelmt_plugin="redhat/openshift-ovs-flannelmt"
   local default_plugin="${subnet_plugin}"
 
   if [ "${plugin}" != "${subnet_plugin}" ] && \
-     [ "${plugin}" != "${multitenant_plugin}" ]; then
+     [ "${plugin}" != "${multitenant_plugin}" ] && \
+     [ "${plugin}" != "${flannelmt_plugin}" ]; then
     # Disable output when being called from the dind management script
     # since it may be doing something other than launching a cluster.
     if [ "${dind_management_script}" = "false" ]; then

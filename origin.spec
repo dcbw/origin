@@ -268,6 +268,10 @@ pushd _thirdpartyhacks/src/%{sdn_import_path}/plugins/osdn/multitenant/bin
    install -p -m 755 openshift-ovs-multitenant %{buildroot}%{_bindir}/openshift-ovs-multitenant
    install -p -m 755 openshift-sdn-multitenant-setup.sh %{buildroot}%{_bindir}/openshift-sdn-multitenant-setup.sh
 popd
+pushd _thirdpartyhacks/src/%{sdn_import_path}/plugins/osdn/flannelmt/bin
+   install -p -m 755 openshift-ovs-flannelmt %{buildroot}%{_bindir}/openshift-ovs-flannelmt
+   install -p -m 755 openshift-sdn-flannelmt-setup.sh %{buildroot}%{_bindir}/openshift-sdn-flannelmt-setup.sh
+popd
 install -d -m 0755 %{buildroot}%{_unitdir}/%{name}-node.service.d
 install -p -m 0644 contrib/systemd/openshift-sdn-ovs.conf %{buildroot}%{_unitdir}/%{name}-node.service.d/openshift-sdn-ovs.conf
 

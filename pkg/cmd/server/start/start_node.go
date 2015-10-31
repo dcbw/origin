@@ -256,7 +256,7 @@ func RunSDNController(config *kubernetes.NodeConfig, nodeConfig configapi.NodeCo
 
 	ch := make(chan struct{})
 
-	controller, endpointFilter, err := factory.NewPlugin(nodeConfig.NetworkConfig.NetworkPluginName, oclient, config.Client, nodeConfig.NodeName, nodeConfig.NodeIP, ch)
+	controller, endpointFilter, err := factory.NewPlugin(nodeConfig.NetworkConfig.NetworkPluginName, oclient, config.Client, nil, nodeConfig.NodeName, nodeConfig.NodeIP, ch)
 	if err != nil {
 		glog.Fatalf("SDN initialization failed: %v", err)
 	}
