@@ -105,6 +105,7 @@ func (oc *OvsController) assignVNID(namespaceName string) error {
 		return err
 	}
 	oc.VNIDMap[namespaceName] = netid
+
 	return nil
 }
 

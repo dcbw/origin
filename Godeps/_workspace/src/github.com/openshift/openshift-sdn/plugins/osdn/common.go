@@ -221,6 +221,8 @@ func (oc *OvsController) StartNode(mtu uint) error {
 	return nil
 }
 
+//--------------------------------------------------------
+
 func (oc *OvsController) Stop() {
 	close(oc.sig)
 }
