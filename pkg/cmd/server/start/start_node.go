@@ -11,6 +11,7 @@ import (
 	"github.com/golang/glog"
 	"github.com/spf13/cobra"
 
+	osdnapi "github.com/openshift/openshift-sdn/plugins/osdn/api"
 	"github.com/openshift/openshift-sdn/plugins/osdn/factory"
 	"github.com/openshift/origin/pkg/cmd/server/kubernetes"
 	kerrors "k8s.io/kubernetes/pkg/api/errors"
@@ -248,27 +249,20 @@ func (o NodeOptions) IsRunFromConfig() bool {
 	return (len(o.ConfigFile) > 0)
 }
 
-func RunSDNController(config *kubernetes.NodeConfig, nodeConfig configapi.NodeConfig) kubernetes.FilteringEndpointsConfigHandler {
+func InitSDNPlugin(config *kubernetes.NodeConfig, nodeConfig configapi.NodeConfig) (osdnapi.OsdnPlugin, kubernetes.FilteringEndpointsConfigHandler) {
 	oclient, _, err := configapi.GetOpenShiftClient(nodeConfig.MasterKubeConfig)
 	if err != nil {
 		glog.Fatal("Failed to get kube client for SDN")
 	}
 
-	controller, endpointFilter, err := factory.NewPlugin(nodeConfig.NetworkConfig.NetworkPluginName, oclient, config.Client, nodeConfig.NodeName, nodeConfig.NodeIP)
+	plugin, endpointFilter, err := factory.NewPlugin(nodeConfig.NetworkConfig.NetworkPluginName, oclient, config.Client, nodeConfig.NodeName, nodeConfig.NodeIP)
 	if err != nil {
 		glog.Fatalf("SDN initialization failed: %v", err)
+	} else if plugin != nil {
+		config.KubeletConfig.NetworkPlugins = append(config.KubeletConfig.NetworkPlugins, plugin)
 	}
 
-	if controller != nil {
-		config.KubeletConfig.NetworkPlugins = append(config.KubeletConfig.NetworkPlugins, controller)
-
-		err := controller.StartNode(nodeConfig.NetworkConfig.MTU)
-		if err != nil {
-			glog.Fatalf("SDN Node failed: %v", err)
-		}
-	}
-
-	return endpointFilter
+	return plugin, endpointFilter
 }
 
 func StartNode(nodeConfig configapi.NodeConfig) error {
@@ -280,8 +274,13 @@ func StartNode(nodeConfig configapi.NodeConfig) error {
 
 	config.EnsureVolumeDir()
 	config.EnsureDocker(docker.NewHelper())
+	plugin, endpointFilter := InitSDNPlugin(config, nodeConfig)
 	config.RunKubelet()
-	endpointFilter := RunSDNController(config, nodeConfig)
+	if plugin != nil {
+		if err := plugin.StartNode(nodeConfig.NetworkConfig.MTU); err != nil {
+			glog.Fatalf("SDN Node failed: %v", err)
+		}
+	}
 	config.RunProxy(endpointFilter)
 
 	return nil
