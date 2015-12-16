@@ -11,8 +11,6 @@ import (
 	"github.com/golang/glog"
 	"github.com/spf13/cobra"
 
-	osdnapi "github.com/openshift/openshift-sdn/plugins/osdn/api"
-	"github.com/openshift/openshift-sdn/plugins/osdn/factory"
 	"github.com/openshift/origin/pkg/cmd/server/kubernetes"
 	kerrors "k8s.io/kubernetes/pkg/api/errors"
 	kcmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
@@ -249,22 +247,6 @@ func (o NodeOptions) IsRunFromConfig() bool {
 	return (len(o.ConfigFile) > 0)
 }
 
-func InitSDNPlugin(config *kubernetes.NodeConfig, nodeConfig configapi.NodeConfig) (osdnapi.OsdnPlugin, kubernetes.FilteringEndpointsConfigHandler) {
-	oclient, _, err := configapi.GetOpenShiftClient(nodeConfig.MasterKubeConfig)
-	if err != nil {
-		glog.Fatal("Failed to get kube client for SDN")
-	}
-
-	plugin, endpointFilter, err := factory.NewPlugin(nodeConfig.NetworkConfig.NetworkPluginName, oclient, config.Client, nodeConfig.NodeName, nodeConfig.NodeIP)
-	if err != nil {
-		glog.Fatalf("SDN initialization failed: %v", err)
-	} else if plugin != nil {
-		config.KubeletConfig.NetworkPlugins = append(config.KubeletConfig.NetworkPlugins, plugin)
-	}
-
-	return plugin, endpointFilter
-}
-
 func StartNode(nodeConfig configapi.NodeConfig) error {
 	config, err := kubernetes.BuildKubernetesNodeConfig(nodeConfig)
 	if err != nil {
@@ -272,16 +254,14 @@ func StartNode(nodeConfig configapi.NodeConfig) error {
 	}
 	glog.Infof("Starting node %s (%s)", config.KubeletServer.HostnameOverride, version.Get().String())
 
+	// preconditions
 	config.EnsureVolumeDir()
 	config.EnsureDocker(docker.NewHelper())
-	plugin, endpointFilter := InitSDNPlugin(config, nodeConfig)
+
+	// async starts
 	config.RunKubelet()
-	if plugin != nil {
-		if err := plugin.StartNode(nodeConfig.NetworkConfig.MTU); err != nil {
-			glog.Fatalf("SDN Node failed: %v", err)
-		}
-	}
-	config.RunProxy(endpointFilter)
+	config.RunSDN()
+	config.RunProxy()
 
 	return nil
 }

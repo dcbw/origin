@@ -169,22 +169,25 @@ func SetFakeCadvisorInterfaceForIntegrationTest() {
 	defaultCadvisorInterface = &cadvisor.Fake{}
 }
 
-type FilteringEndpointsConfigHandler interface {
-	pconfig.EndpointsConfigHandler
-	SetBaseEndpointsHandler(base pconfig.EndpointsConfigHandler)
+func (c *NodeConfig) RunSDN() {
+	if c.SDNPlugin != nil {
+		if err := c.SDNPlugin.StartNode(c.MTU); err != nil {
+			glog.Fatalf("SDN Node failed: %v", err)
+		}
+	}
 }
 
 // RunProxy starts the proxy
-func (c *NodeConfig) RunProxy(endpointsFilterer FilteringEndpointsConfigHandler) {
+func (c *NodeConfig) RunProxy() {
 	// initialize kube proxy
 	serviceConfig := pconfig.NewServiceConfig()
 	endpointsConfig := pconfig.NewEndpointsConfig()
 	loadBalancer := proxy.NewLoadBalancerRR()
-	if endpointsFilterer == nil {
+	if c.FilteringEndpointsHandler == nil {
 		endpointsConfig.RegisterHandler(loadBalancer)
 	} else {
-		endpointsFilterer.SetBaseEndpointsHandler(loadBalancer)
-		endpointsConfig.RegisterHandler(endpointsFilterer)
+		c.FilteringEndpointsHandler.SetBaseEndpointsHandler(loadBalancer)
+		endpointsConfig.RegisterHandler(c.FilteringEndpointsHandler)
 	}
 
 	host, _, err := net.SplitHostPort(c.BindAddress)
