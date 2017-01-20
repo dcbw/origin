@@ -95,19 +95,19 @@ func (mp *multiTenantPlugin) updatePodNetwork(namespace string, oldNetID, netID 
 	mp.node.UpdateEgressNetworkPolicyVNID(namespace, oldNetID, netID)
 }
 
-func (mp *multiTenantPlugin) AddNetNamespace(netns *osapi.NetNamespace) {
+func (mp *multiTenantPlugin) AddNetNamespace(netns *osapi.NetNamespace, mcEnabled bool) {
 	mp.updatePodNetwork(netns.Name, 0, netns.NetID)
 }
 
-func (mp *multiTenantPlugin) UpdateNetNamespace(netns *osapi.NetNamespace, oldNetID uint32) {
+func (mp *multiTenantPlugin) UpdateNetNamespace(netns *osapi.NetNamespace, mcEnabled bool, oldNetID uint32, oldMCEnabled bool) {
 	mp.updatePodNetwork(netns.Name, oldNetID, netns.NetID)
 }
 
-func (mp *multiTenantPlugin) DeleteNetNamespace(netns *osapi.NetNamespace) {
+func (mp *multiTenantPlugin) DeleteNetNamespace(netns *osapi.NetNamespace, mcEnabled bool) {
 	mp.updatePodNetwork(netns.Name, netns.NetID, 0)
 }
 
-func (mp *multiTenantPlugin) GetVNID(namespace string) (uint32, error) {
+func (mp *multiTenantPlugin) GetVNID(namespace string) (uint32, bool, error) {
 	return mp.vnids.WaitAndGetVNID(namespace)
 }
 

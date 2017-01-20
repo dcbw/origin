@@ -13,6 +13,7 @@ const (
 	AssignMacvlanAnnotation    = "pod.network.openshift.io/assign-macvlan"
 	AssignHostSubnetAnnotation = "pod.network.openshift.io/assign-subnet"
 	FixedVnidHost              = "pod.network.openshift.io/fixed-vnid-host"
+	MulticastEnabledAnnotation = "pod.network.openshift.io/multicast-enabled"
 )
 
 func IsOpenShiftNetworkPlugin(pluginName string) bool {

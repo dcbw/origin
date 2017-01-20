@@ -34,11 +34,11 @@ type osdnPolicy interface {
 	Name() string
 	Start(node *OsdnNode) error
 
-	AddNetNamespace(netns *osapi.NetNamespace)
-	UpdateNetNamespace(netns *osapi.NetNamespace, oldNetID uint32)
-	DeleteNetNamespace(netns *osapi.NetNamespace)
+	AddNetNamespace(netns *osapi.NetNamespace, mcEnabled bool)
+	UpdateNetNamespace(netns *osapi.NetNamespace, mcEnabled bool, oldNetID uint32, newMCEnabled bool)
+	DeleteNetNamespace(netns *osapi.NetNamespace, mcEnabled bool)
 
-	GetVNID(namespace string) (uint32, error)
+	GetVNID(namespace string) (uint32, bool, error)
 	GetNamespaces(vnid uint32) []string
 
 	RefVNID(vnid uint32)

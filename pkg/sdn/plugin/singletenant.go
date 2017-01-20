@@ -20,17 +20,17 @@ func (sp *singleTenantPlugin) Start(node *OsdnNode) error {
 	return otx.EndTransaction()
 }
 
-func (sp *singleTenantPlugin) AddNetNamespace(netns *osapi.NetNamespace) {
+func (sp *singleTenantPlugin) AddNetNamespace(netns *osapi.NetNamespace, mcEnabled bool) {
 }
 
-func (sp *singleTenantPlugin) UpdateNetNamespace(netns *osapi.NetNamespace, oldNetID uint32) {
+func (sp *singleTenantPlugin) UpdateNetNamespace(netns *osapi.NetNamespace, mcEnabled bool, oldNetID uint32, oldMCEnabled bool) {
 }
 
-func (sp *singleTenantPlugin) DeleteNetNamespace(netns *osapi.NetNamespace) {
+func (sp *singleTenantPlugin) DeleteNetNamespace(netns *osapi.NetNamespace, mcEnabled bool) {
 }
 
-func (sp *singleTenantPlugin) GetVNID(namespace string) (uint32, error) {
-	return 0, nil
+func (sp *singleTenantPlugin) GetVNID(namespace string) (uint32, bool, error) {
+	return 0, false, nil
 }
 
 func (sp *singleTenantPlugin) GetNamespaces(vnid uint32) []string {
