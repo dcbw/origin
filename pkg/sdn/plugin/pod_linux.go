@@ -243,6 +243,37 @@ func (m *podManager) setup(req *cniserver.PodRequest) (cnitypes.Result, *running
 		return nil, nil, err
 	}
 
+	vnid, err := m.policy.GetVNID(req.PodNamespace)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var v1Pod kapiv1.Pod
+	if err := kapiv1.Convert_api_Pod_To_v1_Pod(pod, &v1Pod, nil); err != nil {
+		return nil, nil, err
+	}
+
+	wantsSDNSetup, nfvResult, err := m.nfvManager.nfvSetup(req, pod)
+	if err != nil {
+		return nil, nil, err
+	} else if nfvResult != nil {
+		if !wantsSDNSetup {
+			result, err := cnicurrent.NewResultFromResult(nfvResult)
+			if err != nil {
+				return nil, nil, fmt.Errorf("failed to convert IPAM result: %v", err)
+			}
+			var mapping *hostport.PodPortMapping
+			if len(result.IPs) > 0 && result.IPs[0].Version == "4" {
+				mapping = hostport.ConstructPodPortMapping(&v1Pod, result.IPs[0].Address.IP)
+			} else {
+				mapping = &hostport.PodPortMapping{}
+			}
+			return nfvResult, &runningPod{podPortMapping: mapping, vnid: vnid}, nil
+		}
+		// If the SDN is selected, it takes precedence in the Kube API
+		// over any of the NFV IP details
+	}
+
 	ipamResult, podIP, err := m.ipamAdd(req.Netns, req.SandboxID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to run IPAM for %v: %v", req.SandboxID, err)
@@ -260,10 +291,6 @@ func (m *podManager) setup(req *cniserver.PodRequest) (cnitypes.Result, *running
 	}()
 
 	// Open any hostports the pod wants
-	var v1Pod kapiv1.Pod
-	if err := kapiv1.Convert_api_Pod_To_v1_Pod(pod, &v1Pod, nil); err != nil {
-		return nil, nil, err
-	}
 	podPortMapping := hostport.ConstructPodPortMapping(&v1Pod, podIP)
 	if err := m.hostportSyncer.OpenPodHostportsAndSync(podPortMapping, TUN, m.getRunningPods()); err != nil {
 		return nil, nil, err
@@ -324,11 +351,6 @@ func (m *podManager) setup(req *cniserver.PodRequest) (cnitypes.Result, *running
 		return nil, nil, err
 	}
 
-	vnid, err := m.policy.GetVNID(req.PodNamespace)
-	if err != nil {
-		return nil, nil, err
-	}
-
 	if err := maybeAddMacvlan(pod, req.Netns); err != nil {
 		return nil, nil, err
 	}
@@ -353,6 +375,18 @@ func (m *podManager) update(req *cniserver.PodRequest) (uint32, error) {
 		return 0, err
 	}
 
+	pod, err := m.kClient.Core().Pods(req.PodNamespace).Get(req.PodName, metav1.GetOptions{})
+	if err != nil {
+		return 0, err
+	}
+
+	sdnUpdate, err := m.nfvManager.nfvUpdate(req, pod)
+	if err != nil {
+		return 0, err
+	} else if !sdnUpdate {
+		return vnid, nil
+	}
+
 	if err := m.ovs.UpdatePod(req.SandboxID, vnid); err != nil {
 		return 0, err
 	}
@@ -369,6 +403,13 @@ func (m *podManager) teardown(req *cniserver.PodRequest) error {
 			glog.V(3).Infof("teardown called on already-destroyed pod %s/%s; only cleaning up IPAM", req.PodNamespace, req.PodName)
 			netnsValid = false
 		}
+	}
+
+	sdnTeardown, err := m.nfvManager.nfvTeardown(req, netnsValid)
+	if err != nil {
+		return err
+	} else if !sdnTeardown {
+		return nil
 	}
 
 	if netnsValid {
