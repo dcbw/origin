@@ -39,6 +39,8 @@ type podManager struct {
 	runningPods     map[string]*runningPod
 	runningPodsLock sync.Mutex
 
+	nfvManager *NfvManager
+
 	// Live pod setup/teardown stuff not used in testing code
 	kClient kclientset.Interface
 	policy  osdnPolicy
@@ -59,6 +61,7 @@ func newPodManager(kClient kclientset.Interface, policy osdnPolicy, mtu uint32, 
 	pm.mtu = mtu
 	pm.podHandler = pm
 	pm.ovs = ovs
+	pm.nfvManager = NewNfvManager()
 	return pm
 }
 

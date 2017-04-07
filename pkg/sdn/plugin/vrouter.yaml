@@ -1,0 +1,40 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vrouter
+  labels:
+    app: vrouter
+  annotations:
+    pod.network.openshift.io/nfv-service-function-chains: |
+      [
+        {
+           "name": "foobar",
+           "toPod": {
+             "app": "vfirewall"
+           },
+           "localAddressing": {
+             "type": "static",
+             "ips": [
+               {"ip":"1.2.3.4/24"}
+             ]
+           },
+           "localContainerName": "vfw-link",
+           "remoteAddressing": {
+             "type": "static",
+             "ips": [
+               {"ip":"1.2.3.3/24"}
+             ]
+           },
+           "remoteContainerName": "vrtr-link"
+        }
+      ]
+    pod.network.openshift.io/nfv-select-sdn: "true"
+spec:
+  containers:
+    - name: vrouter
+      image: nginx
+      ports:
+      - containerPort: 80
+  nodeSelector:
+    kubernetes.io/hostname: openshift-node-2
+

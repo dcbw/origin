@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vfirewall
+  labels:
+    app: vfirewall
+  annotations:
+    pod.network.openshift.io/nfv-select-sdn: "true"
+spec:
+  containers:
+    - name: vfirewall
+      image: nginx
+      ports:
+      - containerPort: 80
+  nodeSelector:
+    kubernetes.io/hostname: openshift-node-2
+

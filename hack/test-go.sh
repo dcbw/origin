@@ -233,6 +233,6 @@ elif [[ -n "${dlv_debug}" ]]; then
     dlv test ${test_packages}
 else
     # we need to generate neither jUnit XML nor coverage reports
-    go test -i ${gotest_flags} ${test_packages}
+#    go test -i ${gotest_flags} ${test_packages}
     go test ${gotest_flags} ${test_packages}
 fi
