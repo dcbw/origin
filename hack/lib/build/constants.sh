@@ -20,6 +20,7 @@ readonly OS_GO_PACKAGE=github.com/openshift/origin
 
 readonly OS_SDN_COMPILE_TARGETS_LINUX=(
   pkg/sdn/plugin/sdn-cni-plugin
+  vendor/github.com/containernetworking/cni/plugins/ipam/dhcp
   vendor/github.com/containernetworking/cni/plugins/ipam/host-local
   vendor/github.com/containernetworking/cni/plugins/main/loopback
 )

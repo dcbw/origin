@@ -455,6 +455,7 @@ function copy-runtime() {
   local target=$2
 
   cp "$(os::util::find::built_binary openshift)" "${target}"
+  cp "$(os::util::find::built_binary dhcp)" "${target}"
   cp "$(os::util::find::built_binary host-local)" "${target}"
   cp "$(os::util::find::built_binary loopback)" "${target}"
   cp "$(os::util::find::built_binary sdn-cni-plugin)" "${target}/openshift-sdn"

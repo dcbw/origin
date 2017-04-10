@@ -15,6 +15,7 @@ os::provision::install-sdn() {
   mkdir -p -m u+rwx,g+rwx,o+rx "${target_cnidir}"
 
   install -m u+rwx,g+rwx,o+rx "${binaries_path}/sdn-cni-plugin" "${target_cnidir}/openshift-sdn"
+  install -m u+rwx,g+rwx,o+rx "${binaries_path}/dhcp" "${target_cnidir}"
   install -m u+rwx,g+rwx,o+rx "${binaries_path}/host-local" "${target_cnidir}"
   install -m u+rwx,g+rwx,o+rx "${binaries_path}/loopback" "${target_cnidir}"
 
