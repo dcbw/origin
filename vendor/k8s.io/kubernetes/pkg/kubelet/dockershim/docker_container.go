@@ -139,6 +139,7 @@ func (ds *dockerService) CreateContainer(podSandboxID string, config *runtimeapi
 
 	hc := createConfig.HostConfig
 	ds.updateCreateConfig(&createConfig, config, sandboxConfig, podSandboxID, securityOptSep, apiVersion)
+
 	// Set devices for container.
 	devices := make([]dockercontainer.DeviceMapping, len(config.Devices))
 	for i, device := range config.Devices {

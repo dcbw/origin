@@ -111,6 +111,7 @@ const (
 	NfvNetworksAnnotation             = "pod.network.openshift.io/nfv-networks"
 	NfvServiceFunctionChainAnnotation = "pod.network.openshift.io/nfv-service-function-chains"
 	NfvSelectSDNAnnotation            = "pod.network.openshift.io/nfv-select-sdn"
+	NfvCPUAffinityAnnotation          = "pod.network.openshift.io/nfv-cpu-affinity"
 )
 
 type nfvPod struct {
