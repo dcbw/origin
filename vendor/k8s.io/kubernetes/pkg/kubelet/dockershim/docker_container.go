@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	dockertypes "github.com/docker/engine-api/types"
@@ -30,6 +32,8 @@ import (
 
 	runtimeapi "k8s.io/kubernetes/pkg/kubelet/api/v1alpha1/runtime"
 	"k8s.io/kubernetes/pkg/kubelet/dockertools"
+
+	sdnapi "github.com/openshift/origin/pkg/sdn/plugin"
 )
 
 const (
@@ -145,6 +149,22 @@ func (ds *dockerService) CreateContainer(podSandboxID string, config *runtimeapi
 
 	// Apply Linux-specific options if applicable.
 	if lc := config.GetLinux(); lc != nil {
+		// *** NFV
+		cpus := ""
+		annotations := config.GetAnnotations()
+		if cpuset, ok := annotations[sdnapi.NfvCPUAffinityAnnotation]; ok {
+			sanitized := make([]string, 0, 2)
+			split := strings.Split(cpuset, ",")
+			for _, cpu := range split {
+				num, err := strconv.ParseUint(cpu, 10, 32)
+				if err != nil {
+					return "", fmt.Errorf("failed to parse CPU affinity annotation '%s': %v", cpuset, err)
+				}
+				sanitized = append(sanitized, fmt.Sprintf("%d", num))
+			}
+			cpus = strings.Join(sanitized, ",")
+		}
+
 		// Apply resource options.
 		// TODO: Check if the units are correct.
 		// TODO: Can we assume the defaults are sane?
@@ -156,8 +176,13 @@ func (ds *dockerService) CreateContainer(podSandboxID string, config *runtimeapi
 				CPUShares:  rOpts.CpuShares,
 				CPUQuota:   rOpts.CpuQuota,
 				CPUPeriod:  rOpts.CpuPeriod,
+				CpusetCpus: cpus,
 			}
 			hc.OomScoreAdj = int(rOpts.OomScoreAdj)
+		} else if len(cpus) > 0 {
+			hc.Resources = dockercontainer.Resources{
+				CpusetCpus: cpus,
+			}
 		}
 		// Note: ShmSize is handled in kube_docker_client.go
 
