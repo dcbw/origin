@@ -13,6 +13,7 @@ import (
 
 	kclientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
 	kubehostport "k8s.io/kubernetes/pkg/kubelet/network/hostport"
+	kexec "k8s.io/kubernetes/pkg/util/exec"
 
 	cnitypes "github.com/containernetworking/cni/pkg/types"
 )
@@ -61,7 +62,7 @@ func newPodManager(kClient kclientset.Interface, policy osdnPolicy, mtu uint32, 
 	pm.mtu = mtu
 	pm.podHandler = pm
 	pm.ovs = ovs
-	pm.nfvManager = NewNfvManager()
+	pm.nfvManager = NewNfvManager(kexec.New(), nil)
 	return pm
 }
 

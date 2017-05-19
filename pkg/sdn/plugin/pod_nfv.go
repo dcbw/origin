@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/openshift/origin/pkg/sdn/plugin/cniserver"
@@ -20,6 +21,7 @@ import (
 	kapi "k8s.io/kubernetes/pkg/api"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	kexec "k8s.io/kubernetes/pkg/util/exec"
 
 	"github.com/containernetworking/cni/pkg/invoke"
 	cniip "github.com/containernetworking/cni/pkg/ip"
@@ -65,11 +67,13 @@ type IPAM struct {
 const (
 	InterfaceTypeVlan = "vlan"
 	InterfaceTypePhysical = "physical"
+	InterfaceTypeSRIOV = "sriov"
 )
 
 type InterfaceSpec struct {
 	// "vlan" - create a VLAN; requires physical options too
 	// "physical" - use a physical NIC
+	// "sriov" - use a Virtual Function (VF) of a physical NIC
 	Type string `json:"type"`
 
 	// Interface name inside container
@@ -83,6 +87,15 @@ type InterfaceSpec struct {
 	MacAddress string `json:"macAddress,omitempty"`
 	// ex: "/sys/devices/pci0000:00/0000:00:19.0"
 	KernelPath string `json:"kernelPath,omitempty"`
+
+	// "sriov" options
+	// index # of the virtual function (VF) to use; if missing the next VF
+	// not in-use by OpenShift will be used.
+	VfIndex    int `json:"vfIndex,omitempty"`
+	// vlan ID to assign to the virtual function
+	VfVlan     uint `json:"vfVlan,omitempty"`
+	// MAC address to assign to the VF
+	VfMacAddress string `json:"vfMacAddress:omitempty"`
 }
 
 type Network struct {
@@ -125,9 +138,11 @@ type nfvPod struct {
 type NfvManager struct {
 	pods       map[string]*nfvPod
 	dhcpConfig []byte
+	exec       kexec.Interface
+	origNS     ns.NetNS
 }
 
-func NewNfvManager() *NfvManager {
+func NewNfvManager(exec kexec.Interface, origNS ns.NetNS) *NfvManager {
 	type dhcpIPAM struct {
 		Type   string           `json:"type"`
 		// TODO: clientID somehow
@@ -147,9 +162,15 @@ func NewNfvManager() *NfvManager {
 		},
 	})
 
+	if origNS == nil {
+		origNS, _ = ns.GetCurrentNS()
+	}
+
 	return &NfvManager{
 		pods:       make(map[string]*nfvPod),
 		dhcpConfig: dhcpConfig,
+		exec:       exec,
+		origNS:     origNS,
 	}
 }
 
@@ -269,6 +290,151 @@ func physicalSetup(netns ns.NetNS, network *Network) (netlink.Link, error) {
 	}
 
 	return ifaceRename(master.Attrs().Name, network.Interface.ContainerName, netns)
+}
+
+func vfnToLink(master netlink.Link, links []netlink.Link, vfn string) (netlink.Link, error) {
+	vfNetPath := fmt.Sprintf("/sys/class/net/%s/device/%s/net", master.Attrs().Name, vfn)
+	files, err := ioutil.ReadDir(vfNetPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find SRIOV VF at %q", vfNetPath)
+	}
+	
+	for _, file := range files {
+		// Make sure it's really an interface
+		for _, l := range links {
+			if file.Name() == l.Attrs().Name {
+				return l, nil
+			}
+		}
+	}		
+
+	return nil, fmt.Errorf("failed to find SRIOV VF %q", vfn)
+}
+
+func vfGetDynamic(link netlink.Link) (bool, error) {
+	output, err := kexec.New().Command("ip", "link", "show", "dev", link.Attrs().Name).CombinedOutput()	
+	if err != nil {
+		return false, fmt.Errorf("failed to get flags for %q: %v", link.Attrs().Name, err)
+	}
+
+	lines := strings.Split(string(output), "\n")
+	if len(lines) == 0 {
+		return false, fmt.Errorf("failed to parse ip output (not enough lines): %q", string(output))
+	}
+	return strings.Contains(lines[0], "DYNAMIC"), nil
+}
+
+func vfSetDynamic(link netlink.Link, dynamic bool) error {
+	val := "on"
+	if !dynamic {
+		val = "off"
+	}
+	if _, err := kexec.New().Command("ip", "link", "set", "dev", link.Attrs().Name, "dynamic", val).CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to set flags for %q: %v", link.Attrs().Name, err)
+	}
+
+	return nil
+}
+
+func sriovGetVf(master netlink.Link, network *Network) (netlink.Link, uint, error) {
+	links, err := netlink.LinkList()
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to list node links: %v", err)
+	}
+
+	if network.Interface.VfIndex >= 0 {
+		vfn := fmt.Sprintf("virtfn%d", network.Interface.VfIndex)
+		vf, err := vfnToLink(master, links, vfn)
+		if err != nil {
+			return nil, 0, err
+		}
+
+		dynamic, err := vfGetDynamic(vf)
+		if err != nil {
+			return nil, 0, err
+		} else if dynamic {
+			return nil, 0, fmt.Errorf("SRIOV VF %q is already in-use by a container", vf.Attrs().Name)
+		}
+
+		return vf, uint(network.Interface.VfIndex), nil
+	}
+
+	// Otherwise find a free VF
+	masterPath := fmt.Sprintf("/sys/class/net/%s/device", master.Attrs().Name, network.Interface.VfIndex)
+	files, err := ioutil.ReadDir(masterPath)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to read master net device directory %q", masterPath)
+	}
+	haveVirtfns := false
+	for _, file := range files {
+		if !strings.HasPrefix(file.Name(), "virtfn") {
+			continue
+		}
+
+		haveVirtfns = true
+		vf, err := vfnToLink(master, links, file.Name())
+		if err != nil {
+			continue
+		}
+
+		// Check for the absence IFF_DYNAMIC flag, which we take to mean
+		// we're not already using this VF for another container
+		dynamic, err := vfGetDynamic(vf)
+		if err != nil {
+			glog.Warningf("%v", err)
+		} else if !dynamic {
+			vfnum := file.Name()[6:]
+			vfidx, err := strconv.Atoi(vfnum)
+			if err != nil {
+				return nil, 0, fmt.Errorf("failed to get VF index from %q: %v", vfnum, err)
+			}
+			return vf, uint(vfidx), nil
+		}
+	}
+
+	if !haveVirtfns {
+		return nil, 0, fmt.Errorf("failed to find any SRIOV 'virtfn' links in %q", masterPath)
+	}
+
+	return nil, 0, fmt.Errorf("failed to find a free SRIOV VF of %q", master.Attrs().Name)
+}
+
+func sriovSetup(netns ns.NetNS, network *Network) (netlink.Link, error) {
+	master, err := findPhysdev(network)
+	if err != nil {
+		return nil, err
+	}
+
+	vf, vfidx, err := sriovGetVf(master, network)
+	if err != nil {
+		return nil, err
+	}
+
+	// Mark this VF as in-use by a container
+	if err := vfSetDynamic(vf, true); err != nil {
+		return nil, err
+	}
+
+	if err := netlink.LinkSetVfVlan(master, int(vfidx), int(network.Interface.VfVlan)); err != nil {
+		return nil, fmt.Errorf("failed to SRIOV VF %q VLAN to %d: %v", vf.Attrs().Name, network.Interface.VfVlan, err)
+	}
+
+	if network.Interface.VfMacAddress != "" {
+		hwaddr, err := net.ParseMAC(network.Interface.VfMacAddress)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse SRIOV VF %q MAC address %q: %v", vf.Attrs().Name, network.Interface.VfMacAddress, err)
+		}
+
+		if err := netlink.LinkSetVfHardwareAddr(master, int(vfidx), hwaddr); err != nil {
+			return nil, fmt.Errorf("failed to SRIOV VF %q MAC address to %q: %v", vf.Attrs().Name, network.Interface.VfMacAddress, err)
+		}
+	}
+
+	if err := netlink.LinkSetNsFd(vf, int(netns.Fd())); err != nil {
+		return nil, err
+	}
+
+	return ifaceRename(vf.Attrs().Name, network.Interface.ContainerName, netns)
 }
 
 // Parses a CIDR and a gateway IP address and returns (a) a CIDR consisting of the
@@ -577,6 +743,8 @@ func (m *NfvManager) nfvSetup(req *cniserver.PodRequest, pod *kapi.Pod) (bool, *
 			link, err = vlanSetup(netns, net)
 		case InterfaceTypePhysical:
 			link, err = physicalSetup(netns, net)
+		case InterfaceTypeSRIOV:
+			link, err = sriovSetup(netns, net)
 		default:
 			return false, nil, fmt.Errorf("invalid NFV interface type %s", net.Interface.Type)
 		}
@@ -659,6 +827,43 @@ func (m *NfvManager) dhcpTeardown(req *cniserver.PodRequest, network *Network, n
 	return nil
 }
 
+func (m *NfvManager) sriovTeardown(network *Network, netns ns.NetNS) error {
+	master, err := findPhysdev(network)
+	if err != nil {
+		return err
+	}
+
+	if netns != nil {
+		// Move the SRIOV link back to the parent netns so we can
+		// clear the DYNAMIC flag
+		linkName := network.Interface.ContainerName
+		if err := netns.Do(func(_ ns.NetNS) error {
+			vf, err := netlink.LinkByName(linkName)
+			if err != nil {
+				return fmt.Errorf("failed to refetch link %q: %v", linkName, err)
+			}
+
+			if err := netlink.LinkSetDown(vf); err != nil {
+				return fmt.Errorf("failed to set link %q down: %v", linkName, err)
+			}
+
+			if err := netlink.LinkSetNsFd(vf, int(m.origNS.Fd())); err != nil {
+				return fmt.Errorf("failed to set link %q to original netns: %v", err)
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+	}
+
+	vf, _, err := sriovGetVf(master, network)
+	if err != nil {
+		return err
+	}
+
+	return vfSetDynamic(vf, false)
+}
+
 func (m *NfvManager) nfvTeardown(req *cniserver.PodRequest, netnsValid bool) (bool, error) {
 	podKey := getPodKey(req)
 	nfvPod, ok := m.pods[podKey]
@@ -689,6 +894,12 @@ func (m *NfvManager) nfvTeardown(req *cniserver.PodRequest, netnsValid bool) (bo
 		if net.Addressing.Type == IPAMTypeAuto {
 			if err := m.dhcpTeardown(req, net, netns); err != nil {
 				glog.Warningf("Failed to tear down DHCP IPAM for %q/%q: %v", req.PodNamespace, req.PodName, err)
+			}
+		}
+
+		if net.Interface.Type == InterfaceTypeSRIOV {
+			if err := m.sriovTeardown(net, netns); err != nil {
+				glog.Warningf("Failed to tear down SRIOV VF for %q/%q: %v", req.PodNamespace, req.PodName, err)
 			}
 		}
 	}
