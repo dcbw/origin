@@ -557,6 +557,64 @@ func TestPodNFV(t *testing.T) {
 				},
 			},
 		},
+		"ADD+DEL SRIOV": {
+			operations: []*nfvOperation{
+				{
+					command:   cniserver.CNI_ADD,
+					namespace: "namespace5",
+					name:      "pod1",
+					expectNS:  true,
+					createLinks: []string{"dummy0"},
+					pod:       &kapi.Pod{
+						ObjectMeta: metav1.ObjectMeta{
+							Annotations: map[string]string{
+								"pod.network.openshift.io/nfv-select-sdn": "false",
+								"pod.network.openshift.io/nfv-networks": `{
+  "customer": {
+    "addressing": {
+      "type": "static",
+      "ips": [
+        {"ip": "192.168.1.5/24","gateway": "192.168.1.1"}
+      ]
+    },
+    "interface": {
+      "type": "sriov",
+      "vfIndex": 0,
+      "vfVlan": 1234,
+      "ifname": "dummy0",
+      "containerName": "eth1"
+    }
+  }
+}`,
+							},
+						},
+					},
+					podLinks: []linkDesc{
+						newLinkDesc("eth1", "sriov", "192.168.1.5/24"),
+					},
+					result: &cnicurrent.Result{
+						Interfaces: []*cnicurrent.Interface{
+							{
+								Name: "eth1",
+							},
+						},
+						IPs: []*cnicurrent.IPConfig{
+							{
+								Version: "4",
+								Address: mustParseIPNet("192.168.1.5/24"),
+								Gateway: net.ParseIP("192.168.1.1").To4(),
+							},
+						},
+					},
+				},
+				{
+					command:   cniserver.CNI_DEL,
+					namespace: "namespace5",
+					name:      "pod1",
+					expectNS:  true,
+				},
+			},
+		},
 	}
 
 	testNSs := make(map[string]ns.NetNS)
@@ -575,7 +633,8 @@ func TestPodNFV(t *testing.T) {
 		}
 	}(&testNSs)
 
-	nfv := NewNfvManager()
+	fexec := &kexec.FakeExec{}
+	nfv := NewNfvManager(fexec)
 
 	for k, tc := range testcases {
 		for opidx, op := range tc.operations {
