@@ -13,14 +13,12 @@ metadata:
              "app": "vfirewall"
            },
            "localAddressing": {
-             "type": "static",
              "ips": [
                {"ip":"1.2.3.4/24"}
              ]
            },
            "localContainerName": "vfw-link",
            "remoteAddressing": {
-             "type": "static",
              "ips": [
                {"ip":"1.2.3.3/24"}
              ]

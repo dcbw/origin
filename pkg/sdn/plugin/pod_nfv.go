@@ -9,18 +9,21 @@ import (
 	"io/ioutil"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/openshift/origin/pkg/sdn/plugin/cniserver"
 
 	"github.com/golang/glog"
 
-	kapi "k8s.io/kubernetes/pkg/api"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	kapi "k8s.io/kubernetes/pkg/api"
 	kexec "k8s.io/kubernetes/pkg/util/exec"
 
 	"github.com/containernetworking/cni/pkg/invoke"
@@ -39,35 +42,28 @@ type Route struct {
 	NextHop string `json:"nextHop,omitempty"`
 }
 
-const (
-	IPAMTypeStatic = "static"
-	IPAMTypeAuto   = "auto"
-	IPAMTypeNone   = "none"
-)
-
 type IPAddr struct {
-	IP      string   `json:"ip"`
-	Gateway string   `json:"gateway,omitempty"`
+	IP      string `json:"ip"`
+	Gateway string `json:"gateway,omitempty"`
 }
 
 type IPAM struct {
-	// "static" - static IP; requires CIDR, gateway, optional routes
-	// "auto" - use DHCP (interfaces); optional ClientID
-	// "none" - no addressing
-	Type string `json:"type"`
-
 	// "static" config items
 	IPs    []IPAddr `json:"ips,omitempty"`
 	Routes []*Route `json:"routes,omitempty"`
 
-	// "dhcp" config items
+	// "dhcpv4" config items
+	Dhcp4    bool   `json:"dhcp4,omitempty"`
 	ClientID string `json:"clientId,omitempty"`
+
+	// Do IPv6 SLAAC configuration
+	Slaac6 bool `json:"slaac6,omitempty"`
 }
 
 const (
-	InterfaceTypeVlan = "vlan"
+	InterfaceTypeVlan     = "vlan"
 	InterfaceTypePhysical = "physical"
-	InterfaceTypeSRIOV = "sriov"
+	InterfaceTypeSRIOV    = "sriov"
 )
 
 type InterfaceSpec struct {
@@ -91,9 +87,9 @@ type InterfaceSpec struct {
 	// "sriov" options
 	// index # of the virtual function (VF) to use; if missing the next VF
 	// not in-use by OpenShift will be used.
-	VfIndex    int `json:"vfIndex,omitempty"`
+	VfIndex int `json:"vfIndex,omitempty"`
 	// vlan ID to assign to the virtual function
-	VfVlan     uint `json:"vfVlan,omitempty"`
+	VfVlan uint `json:"vfVlan,omitempty"`
 	// MAC address to assign to the VF
 	VfMacAddress string `json:"vfMacAddress:omitempty"`
 }
@@ -111,10 +107,10 @@ type ServiceFunctionChain struct {
 	ToPod map[string]string `json:"toPod,omitempty"`
 
 	// IP addressoing for this pod's end of the veth pair
-	LocalAddressing    IPAM `json:"localAddressing"`
+	LocalAddressing    IPAM   `json:"localAddressing"`
 	LocalContainerName string `json:"localContainerName"`
 	// IP addressing for selected (other) pod's end of the veth pair
-	RemoteAddressing    IPAM `json:"remoteAddressing"`
+	RemoteAddressing    IPAM   `json:"remoteAddressing"`
 	RemoteContainerName string `json:"remoteContainerName"`
 
 	MTU uint `json:"mtu,omitempty"`
@@ -140,11 +136,12 @@ type NfvManager struct {
 	dhcpConfig []byte
 	exec       kexec.Interface
 	origNS     ns.NetNS
+	DhcpClient *os.Process
 }
 
 func NewNfvManager(exec kexec.Interface, origNS ns.NetNS) *NfvManager {
 	type dhcpIPAM struct {
-		Type   string           `json:"type"`
+		Type string `json:"type"`
 		// TODO: clientID somehow
 	}
 
@@ -298,7 +295,7 @@ func vfnToLink(master netlink.Link, links []netlink.Link, vfn string) (netlink.L
 	if err != nil {
 		return nil, fmt.Errorf("failed to find SRIOV VF at %q", vfNetPath)
 	}
-	
+
 	for _, file := range files {
 		// Make sure it's really an interface
 		for _, l := range links {
@@ -306,13 +303,13 @@ func vfnToLink(master netlink.Link, links []netlink.Link, vfn string) (netlink.L
 				return l, nil
 			}
 		}
-	}		
+	}
 
 	return nil, fmt.Errorf("failed to find SRIOV VF %q", vfn)
 }
 
 func vfGetDynamic(link netlink.Link) (bool, error) {
-	output, err := kexec.New().Command("ip", "link", "show", "dev", link.Attrs().Name).CombinedOutput()	
+	output, err := kexec.New().Command("ip", "link", "show", "dev", link.Attrs().Name).CombinedOutput()
 	if err != nil {
 		return false, fmt.Errorf("failed to get flags for %q: %v", link.Attrs().Name, err)
 	}
@@ -561,9 +558,100 @@ func createDHCPArgs(containerID string, netns ns.NetNS, ifName string, action cn
 	}
 }
 
+const DhcpClientPidfile string = "/run/openshift-dhcp-client.pid"
+const DhcpClientPath string = "/opt/cni/bin/dhcp"
+const DhcpSocketPath string = "/run/cni/dhcp.sock"
+
+func runDhcpClient() (*os.Process, error) {
+	var out bytes.Buffer
+	var oerr bytes.Buffer
+
+	os.Remove(DhcpClientPidfile)
+	cmd := exec.Command(DhcpClientPath, "daemon", "--pidfile", DhcpClientPidfile)
+	cmd.Stdout = &out
+	cmd.Stderr = &oerr
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("failed to start DHCP client process: %v", err)
+	}
+
+	// Wait up to 5 seconds for the DHCP client socket path to exist
+	for i := 0; i < 50; i++ {
+		time.Sleep(time.Second / 10)
+		if _, err := os.Stat(DhcpSocketPath); err == nil {
+			return cmd.Process, nil
+		}
+	}
+	cmd.Process.Kill()
+	cmd.Process.Release()
+	return nil, fmt.Errorf("timed out waiting for DHCP client daemon to start: %s / %s", out.String(), oerr.String())
+}
+
+func (m *NfvManager) KillDhcpClient() {
+	p := m.DhcpClient
+	if p == nil {
+		p = findDhcpClient()
+		if p == nil {
+			return
+		}
+	}
+	m.DhcpClient = nil
+	p.Kill()
+	p.Release()
+	os.Remove(DhcpSocketPath)
+	os.Remove(DhcpClientPidfile)
+}
+
+func findDhcpClient() *os.Process {
+	data, err := ioutil.ReadFile(DhcpClientPidfile)
+	if err != nil {
+		return nil
+	}
+
+	success := false
+	defer func(success *bool) {
+		if !*success {
+			os.Remove(DhcpClientPidfile)
+		}
+	}(&success)
+
+	pid, err := strconv.Atoi(string(data))
+	if err != nil {
+		return nil
+	}
+
+	// Make sure the process is really a dhcp client
+	data, err = ioutil.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	if err != nil {
+		return nil
+	}
+	if !strings.HasPrefix(string(data), DhcpClientPath) {
+		return nil
+	}
+
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return nil
+	}
+
+	success = true
+	return process
+}
+
 func (m *NfvManager) ipamSetupDHCP(containerID string, netns ns.NetNS, containerIfname string) (*cnitypes.Result, error) {
+	// Find an existing client, or start one if needed
+	if m.DhcpClient == nil {
+		m.DhcpClient = findDhcpClient()
+		if m.DhcpClient == nil {
+			var err error
+			m.DhcpClient, err = runDhcpClient()
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+
 	args := createDHCPArgs(containerID, netns, containerIfname, cniserver.CNI_ADD)
-	result, err := invoke.ExecPluginWithResult("/opt/cni/bin/dhcp", m.dhcpConfig, args)
+	result, err := invoke.ExecPluginWithResult(DhcpClientPath, m.dhcpConfig, args)
 	if err != nil {
 		return nil, fmt.Errorf("failed to run CNI DHCP IPAM ADD: %v", err)
 	}
@@ -581,20 +669,131 @@ func (m *NfvManager) ipamSetupDHCP(containerID string, netns ns.NetNS, container
 	return result, nil
 }
 
-func (m *NfvManager) ipamSetup(containerID string, netns ns.NetNS, ipam IPAM, link netlink.Link) (*cnitypes.Result, error) {
-	var err error
-
+func (m *NfvManager) ipamSetupSlaac(containerID string, netns ns.NetNS, containerIfname string) (*cnitypes.Result, error) {
 	result := &cnitypes.Result{}
-	switch ipam.Type {
-	case IPAMTypeStatic:
-		result, err = ipamSetupStatic(ipam, netns, link.Attrs().Name)
-	case IPAMTypeAuto:
-		result, err = m.ipamSetupDHCP(containerID, netns, link.Attrs().Name)
-	case IPAMTypeNone:
-		return result, nil
+
+	if err := netns.Do(func(_ ns.NetNS) error {
+		ch := make(chan netlink.AddrUpdate)
+		done := make(chan struct{})
+		defer close(done)
+
+		if err := netlink.AddrSubscribe(ch, done); err != nil {
+			return fmt.Errorf("failed to listen for netlink address events: %v", err)
+		}
+
+		link, err := netlink.LinkByName(containerIfname)
+		if err != nil {
+			return fmt.Errorf("failed to get container interface: %s", err)
+		}
+
+		if err := netlink.LinkSetDown(link); err != nil {
+			return fmt.Errorf("failed to down container interface: %s", err)
+		}
+		// Toggle disable_ipv6 to force the kernel to listen for RAs again
+		fileName := fmt.Sprintf("/proc/sys/net/ipv6/conf/%s/disable_ipv6", containerIfname)
+		if err := ioutil.WriteFile(fileName, []byte("1"), 0644); err != nil {
+			return fmt.Errorf("failed to toggle %q IPv6 off: %v", containerIfname, err)
+		}
+		time.Sleep(time.Second / 10)
+		if err := ioutil.WriteFile(fileName, []byte("0"), 0644); err != nil {
+			return fmt.Errorf("failed to toggle %q IPv6 on: %v", containerIfname, err)
+		}
+		if err := netlink.LinkSetUp(link); err != nil {
+			return fmt.Errorf("failed to up container interface: %s", err)
+		}
+
+		// Wait up to 10s for a non-link-local address to show up
+	loop:
+		for {
+			select {
+			case update := <-ch:
+				if update.LinkIndex == link.Attrs().Index &&
+					update.LinkAddress.IP.To4() == nil &&
+					update.NewAddr &&
+					(update.Flags&syscall.IFA_F_TENTATIVE) == 0 &&
+					(update.Flags&syscall.IFA_F_DADFAILED) == 0 &&
+					!update.LinkAddress.IP.IsLinkLocalUnicast() &&
+					!update.LinkAddress.IP.IsLinkLocalMulticast() {
+					result.IP6 = &cnitypes.IPConfig{
+						IP: update.LinkAddress,
+					}
+					break loop
+				}
+			case <-time.After(time.Second * 10):
+				return fmt.Errorf("timed out waiting for IPv6 SLAAC address")
+			}
+		}
+
+		// Look for an IPv6 default route through the container interface,
+		// from which we grab the gateway
+		routes, err := netlink.RouteList(link, netlink.FAMILY_V6)
+		if err != nil {
+			return fmt.Errorf("failed to list %q IPv6 routes: %v", err)
+		}
+		for _, r := range routes {
+			if r.Dst != nil {
+				ones, _ := r.Dst.Mask.Size()
+				if ones != 0 {
+					// Non-default route; ignore
+					continue
+				}
+			}
+			result.IP6.Gateway = r.Gw
+			break
+		}
+
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 
-	return result, err
+	return result, nil
+}
+
+func mergeCniResult(src, dest *cnitypes.Result) {
+	if dest.IP4 == nil && src != nil && src.IP4 != nil {
+		dest.IP4 = src.IP4
+		dest.IP4.IP.IP = dest.IP4.IP.IP.To4()
+		dest.IP4.Gateway = dest.IP4.Gateway.To4()
+	}
+	if dest.IP6 == nil && src != nil && src.IP6 != nil {
+		dest.IP6 = src.IP6
+	}
+}
+
+func (m *NfvManager) ipamSetup(containerID string, netns ns.NetNS, ipam IPAM, link netlink.Link) (*cnitypes.Result, error) {
+	var (
+		err       error
+		tmpResult *cnitypes.Result
+	)
+
+	result := &cnitypes.Result{}
+
+	if len(ipam.IPs) > 0 {
+		tmpResult, err = ipamSetupStatic(ipam, netns, link.Attrs().Name)
+		if err != nil {
+			return nil, err
+		}
+		mergeCniResult(tmpResult, result)
+	}
+
+	if ipam.Dhcp4 {
+		tmpResult, err = m.ipamSetupDHCP(containerID, netns, link.Attrs().Name)
+		if err != nil {
+			return nil, err
+		}
+		mergeCniResult(tmpResult, result)
+	}
+
+	if ipam.Slaac6 {
+		tmpResult, err = m.ipamSetupSlaac(containerID, netns, link.Attrs().Name)
+		if err != nil {
+			return nil, err
+		}
+		mergeCniResult(tmpResult, result)
+	}
+
+	return result, nil
 }
 
 func getPodNetworksAndChains(annotations *map[string]string) (map[string]*Network, []*ServiceFunctionChain, error) {
@@ -614,7 +813,10 @@ func getPodNetworksAndChains(annotations *map[string]string) (map[string]*Networ
 			return nil, nil, fmt.Errorf("error parsing NFV SFC annotation JSON: %v", err)
 		}
 		for _, chain := range chains {
-			if chain.LocalAddressing.Type == IPAMTypeAuto || chain.RemoteAddressing.Type == IPAMTypeAuto {
+			if chain.LocalAddressing.Slaac6 ||
+				chain.LocalAddressing.Dhcp4 ||
+				chain.RemoteAddressing.Slaac6 ||
+				chain.RemoteAddressing.Dhcp4 {
 				return nil, nil, fmt.Errorf("IPAM type 'auto' not allowed for chains")
 			}
 		}
@@ -733,7 +935,7 @@ func (m *NfvManager) nfvSetup(req *cniserver.PodRequest, pod *kapi.Pod) (bool, *
 	var firstResult *cnitypes.Result
 	for _, name := range netNames {
 		var link netlink.Link
-		var err  error
+		var err error
 
 		net := networks[name]
 
@@ -754,7 +956,7 @@ func (m *NfvManager) nfvSetup(req *cniserver.PodRequest, pod *kapi.Pod) (bool, *
 		}
 
 		// set up IPAM on the container interface
-		result, err := m.ipamSetup(req.SandboxID, netns, net.Addressing, link);
+		result, err := m.ipamSetup(req.SandboxID, netns, net.Addressing, link)
 		if err != nil {
 			return false, nil, err
 		}
@@ -828,14 +1030,7 @@ func (m *NfvManager) dhcpTeardown(req *cniserver.PodRequest, network *Network, n
 }
 
 func (m *NfvManager) sriovTeardown(network *Network, netns ns.NetNS) error {
-	master, err := findPhysdev(network)
-	if err != nil {
-		return err
-	}
-
 	if netns != nil {
-		// Move the SRIOV link back to the parent netns so we can
-		// clear the DYNAMIC flag
 		linkName := network.Interface.ContainerName
 		if err := netns.Do(func(_ ns.NetNS) error {
 			vf, err := netlink.LinkByName(linkName)
@@ -843,25 +1038,13 @@ func (m *NfvManager) sriovTeardown(network *Network, netns ns.NetNS) error {
 				return fmt.Errorf("failed to refetch link %q: %v", linkName, err)
 			}
 
-			if err := netlink.LinkSetDown(vf); err != nil {
-				return fmt.Errorf("failed to set link %q down: %v", linkName, err)
-			}
-
-			if err := netlink.LinkSetNsFd(vf, int(m.origNS.Fd())); err != nil {
-				return fmt.Errorf("failed to set link %q to original netns: %v", err)
-			}
-			return nil
+			return vfSetDynamic(vf, false)
 		}); err != nil {
 			return err
 		}
 	}
 
-	vf, _, err := sriovGetVf(master, network)
-	if err != nil {
-		return err
-	}
-
-	return vfSetDynamic(vf, false)
+	return nil
 }
 
 func (m *NfvManager) nfvTeardown(req *cniserver.PodRequest, netnsValid bool) (bool, error) {
@@ -891,7 +1074,7 @@ func (m *NfvManager) nfvTeardown(req *cniserver.PodRequest, netnsValid bool) (bo
 	}
 
 	for _, net := range networks {
-		if net.Addressing.Type == IPAMTypeAuto {
+		if net.Addressing.Dhcp4 {
 			if err := m.dhcpTeardown(req, net, netns); err != nil {
 				glog.Warningf("Failed to tear down DHCP IPAM for %q/%q: %v", req.PodNamespace, req.PodName, err)
 			}
