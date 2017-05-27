@@ -1096,6 +1096,10 @@
 			"Rev": "5215b55f46b2b919f50a1df0eaa5886afe4e3b3d"
 		},
 		{
+			"ImportPath": "github.com/d2g/dhcp4server",
+			"Rev": "1b74244053681c90de5cf1af3d6b5c93b74e3abb"
+		},
+		{
 			"ImportPath": "github.com/davecgh/go-spew/spew",
 			"Rev": "5215b55f46b2b919f50a1df0eaa5886afe4e3b3d"
 		},
@@ -3685,6 +3689,10 @@
 			"Rev": "292a51b8d262487dab23a588950e8052d63d9113"
 		},
 		{
+			"ImportPath": "golang.org/x/net/bpf",
+			"Rev": "e90d6d0afc4c315a0d87a568ae68577cc15149a0"
+		},
+		{
 			"ImportPath": "golang.org/x/net/context",
 			"Rev": "f2499483f923065a842d38eb4c7f1927e6fc6e6d"
 		},
@@ -3713,8 +3721,16 @@
 			"Rev": "f2499483f923065a842d38eb4c7f1927e6fc6e6d"
 		},
 		{
+			"ImportPath": "golang.org/x/net/internal/iana",
+			"Rev": "e90d6d0afc4c315a0d87a568ae68577cc15149a0"
+		},
+		{
 			"ImportPath": "golang.org/x/net/internal/timeseries",
 			"Rev": "f2499483f923065a842d38eb4c7f1927e6fc6e6d"
+		},
+		{
+			"ImportPath": "golang.org/x/net/ipv4",
+			"Rev": "e90d6d0afc4c315a0d87a568ae68577cc15149a0"
 		},
 		{
 			"ImportPath": "golang.org/x/net/lex/httplex",
