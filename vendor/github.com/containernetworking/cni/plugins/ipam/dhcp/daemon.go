@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/rpc"
 	"os"
+	"io/ioutil"
 	"path/filepath"
 	"runtime"
 	"sync"
@@ -145,6 +146,18 @@ func runDaemon() {
 	// since other goroutines (on separate threads) will change namespaces,
 	// ensure the RPC server does not get scheduled onto those
 	runtime.LockOSThread()
+
+	// Write the pidfile
+	if len(os.Args) >= 4 && os.Args[2] == "--pidfile" {
+		if !filepath.IsAbs(os.Args[3]) {
+			log.Printf("Error writing pidfile %q: path not absolute", os.Args[3])
+			return
+		}
+		if err := ioutil.WriteFile(os.Args[3], []byte(fmt.Sprintf("%d", os.Getpid())), 0644); err != nil {
+			log.Printf("Error writing pidfile %q: %v", os.Args[3], err)
+			return
+		}
+	}
 
 	l, err := getListener()
 	if err != nil {
