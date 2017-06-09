@@ -68,6 +68,14 @@ func newVethLinkDesc(name, ip, podNamespace, podName string) linkDesc {
 	}
 }
 
+func newBridgeLinkDesc(name string, vlanid uint) linkDesc {
+	return linkDesc{
+		name:     name,
+		linkType: "bridge",
+		vlanid:   vlanid,
+	}
+}
+
 type opSetupFn func(m *NfvManager, origNS ns.NetNS, stopCh <-chan bool) error
 
 type vethLink struct {
@@ -413,7 +421,7 @@ func createDummys(links []string) error {
 	return nil
 }
 
-func validateExpectedLinks(expectedLinks []linkDesc, nsm *nsManager, testNS ns.NetNS) error {
+func validateExpectedLinks(expectedLinks []linkDesc, nsm *nsManager, testNS, originalNS ns.NetNS) error {
 	for _, el := range expectedLinks {
 		var err error
 
@@ -424,6 +432,8 @@ func validateExpectedLinks(expectedLinks []linkDesc, nsm *nsManager, testNS ns.N
 			if err != nil {
 				return err
 			}
+		} else if el.linkType == "bridge" {
+			netns = originalNS
 		}
 
 		if err := netns.Do(func(ns.NetNS) error {
@@ -446,6 +456,33 @@ func validateExpectedLinks(expectedLinks []linkDesc, nsm *nsManager, testNS ns.N
 			case "veth":
 				if _, ok := link.(*netlink.Veth); !ok {
 					return fmt.Errorf("failed to cast link %q to veth", el.name)
+				}
+			case "bridge":
+				if _, ok := link.(*netlink.Bridge); !ok {
+					return fmt.Errorf("failed to cast link %q to bridge", el.name)
+				}
+				// Find a bridge port that's a VLAN of the given ID
+				links, err := netlink.LinkList()
+				if err != nil {
+					return fmt.Errorf("failed to list links: %v", err)
+				}
+				found := false
+				for _, l := range links {
+					if l.Attrs().MasterIndex != link.Attrs().Index {
+						continue
+					}
+					vlport, ok := l.(*netlink.Vlan)
+					if !ok {
+						continue
+					}
+					if vlport.VlanId != int(el.vlanid) {
+						return fmt.Errorf("bridge %q vlan port %q had unexpected VLAN ID %d (expected %d)", el.name, l.Attrs().Name, vlport.VlanId, el.vlanid)
+					}
+					found = true
+					break
+				}
+				if !found {
+					return fmt.Errorf("failed to find port with VLAN ID %d on bridge %q %s", el.vlanid, el.name)
 				}
 			}
 			return findAddr(link, el.ip)
@@ -585,9 +622,15 @@ func runTestCommon(t *testing.T, ops []*nfvOperation) {
 
 				if err == nil {
 					if !reflect.DeepEqual(result, op.result) {
-						return fmt.Errorf("setup got\n%#v\nexpected %#v", result, op.result)
+						if result.IP4 != nil && op.result.IP4 != nil {
+							return fmt.Errorf("setup got\n%#v\n   IP4: %#v\nexpected %#v\n  IP4: %#v", result, *result.IP4, op.result, *op.result.IP4)
+						} else if result.IP6 != nil && op.result.IP6 != nil {
+							return fmt.Errorf("setup got\n%#v\n   IP6: %#v\nexpected %#v\n  IP6: %#v", result, *result.IP6, op.result, *op.result.IP6)
+						} else {
+							return fmt.Errorf("setup got\n%#v\nexpected %#v", result, op.result)
+						}
 					}
-					if err := validateExpectedLinks(op.expectedLinks, nsm, testNS); err != nil {
+					if err := validateExpectedLinks(op.expectedLinks, nsm, testNS, originalNS); err != nil {
 						t.Fatalf(err.Error())
 					}
 				}
@@ -1156,6 +1199,99 @@ func TestPodNFVIPv6SLAAC(t *testing.T) {
 		{
 			command:   cniserver.CNI_DEL,
 			namespace: "namespace-slaac",
+			name:      "pod1",
+		},
+	})
+}
+
+func TestPodNFVBridgedVLAN(t *testing.T) {
+	if !runTestAsRoot(t) {
+		return
+	}
+
+	runTestCommon(t, []*nfvOperation{
+		{
+			command:      cniserver.CNI_ADD,
+			namespace:    "namespace1",
+			name:         "pod1",
+			createDummys: []string{"dummy0"},
+			pod: &kapi.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						"pod.network.openshift.io/nfv-select-sdn": "false",
+						"pod.network.openshift.io/nfv-networks": `{
+  "bv-test": {
+    "addressing": {
+      "ips": [
+        {"ip": "192.168.1.5/24","gateway": "192.168.1.1"}
+      ]
+    },
+    "interface": {
+      "type": "bridged-vlan",
+      "vlanId": 42,
+      "ifname": "dummy0",
+      "containerName": "eth1"
+    }
+  }
+}`,
+					},
+				},
+			},
+			expectedLinks: []linkDesc{
+				newVethLinkDesc("eth1", "192.168.1.5/24", "namespace1", "pod1"),
+				newBridgeLinkDesc("br-vlan42", 42),
+			},
+			result: &cnitypes.Result{
+				IP4: &cnitypes.IPConfig{
+					IP:      mustParseIPNet("192.168.1.5/24"),
+					Gateway: net.ParseIP("192.168.1.1").To4(),
+				},
+			},
+		},
+		{
+			command:      cniserver.CNI_ADD,
+			namespace:    "namespace2",
+			name:         "pod1",
+			pod: &kapi.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						"pod.network.openshift.io/nfv-select-sdn": "false",
+						"pod.network.openshift.io/nfv-networks": `{
+  "bv-test2": {
+    "addressing": {
+      "ips": [
+        {"ip": "192.168.1.6/24","gateway": "192.168.1.1"}
+      ]
+    },
+    "interface": {
+      "type": "bridged-vlan",
+      "vlanId": 42,
+      "ifname": "dummy0",
+      "containerName": "eth1"
+    }
+  }
+}`,
+					},
+				},
+			},
+			expectedLinks: []linkDesc{
+				newVethLinkDesc("eth1", "192.168.1.6/24", "namespace2", "pod1"),
+			},
+			result: &cnitypes.Result{
+				IP4: &cnitypes.IPConfig{
+					IP:      mustParseIPNet("192.168.1.6/24"),
+					Gateway: net.ParseIP("192.168.1.1").To4(),
+				},
+			},
+		},
+		{
+			command:   cniserver.CNI_DEL,
+			namespace: "namespace1",
+			name:      "pod1",
+		},
+		{
+			command:   cniserver.CNI_DEL,
+			namespace: "namespace2",
 			name:      "pod1",
 		},
 	})
