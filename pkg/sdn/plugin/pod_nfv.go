@@ -62,13 +62,18 @@ type IPAM struct {
 }
 
 const (
-	InterfaceTypeVlan     = "vlan"
-	InterfaceTypePhysical = "physical"
-	InterfaceTypeSRIOV    = "sriov"
+	InterfaceTypeVlan        = "vlan"
+	InterfaceTypeBridgedVlan = "bridged-vlan"
+	InterfaceTypePhysical    = "physical"
+	InterfaceTypeSRIOV       = "sriov"
 )
 
 type InterfaceSpec struct {
 	// "vlan" - create a VLAN; requires physical options too
+	// "bridged-vlan" - attach pod with a veth to bridge that is attached
+	//                  to a VLAN created from the named device.  Allows
+	//                  multiple pods on the same VLAN.  Requires physical
+	//                  options and 'vlan' options.
 	// "physical" - use a physical NIC
 	// "sriov" - use a Virtual Function (VF) of a physical NIC
 	Type string `json:"type"`
@@ -269,6 +274,129 @@ func vlanSetup(netns ns.NetNS, network *Network) (netlink.Link, error) {
 	}
 
 	return ifaceRename(tmpName, network.Interface.ContainerName, netns)
+}
+
+func bridgedVlanSetup(netns ns.NetNS, network *Network) (netlink.Link, error) {
+	master, err := findPhysdev(network)
+	if err != nil {
+		return nil, err
+	}
+
+	// find an existing bridge
+	bridgeName := fmt.Sprintf("br-vlan%d", network.Interface.VlanID)
+	bl, _ := netlink.LinkByName(bridgeName)
+	if bl != nil {
+		if _, ok := bl.(*netlink.Bridge); !ok {
+			return nil, fmt.Errorf("link %q was not a bridge", bridgeName)
+		}
+	} else {
+		// or make a new one
+		vlanName := fmt.Sprintf("%s.%d", master.Attrs().Name, network.Interface.VlanID)
+
+		// Create the vlan interface and attach it to the bridge
+		v := &netlink.Vlan{
+			LinkAttrs: netlink.LinkAttrs{
+				Name:        vlanName,
+				ParentIndex: master.Attrs().Index,
+			},
+			VlanId: int(network.Interface.VlanID),
+		}
+
+		if err := netlink.LinkAdd(v); err != nil {
+			return nil, fmt.Errorf("failed to create vlan: %v", err)
+		}
+
+		vl, err := netlink.LinkByName(vlanName)
+		if err != nil {
+			return nil, fmt.Errorf("failed to refetch vlan %q: %v", vlanName, err)
+		}
+
+		if err := netlink.LinkSetUp(vl); err != nil {
+			return nil, fmt.Errorf("failed to set %q UP: %v", vlanName, err)
+		}
+
+		b := &netlink.Bridge{
+			LinkAttrs: netlink.LinkAttrs{
+				Name: bridgeName,
+				MTU: vl.Attrs().MTU,
+			},
+		}
+		if err := netlink.LinkAdd(b); err != nil {
+			return nil, fmt.Errorf("failed to create bridge %q: %v", bridgeName, err)
+		}
+
+		bl, err = netlink.LinkByName(bridgeName)
+		if err != nil {
+			return nil, fmt.Errorf("failed to refetch bridge %q: %v", bridgeName, err)
+		}
+		if err := netlink.LinkSetUp(bl); err != nil {
+			return nil, fmt.Errorf("failed to set %q UP: %v", bridgeName, err)
+		}
+
+		bridgeLink := bl.(*netlink.Bridge)
+		if err := netlink.LinkSetMaster(vl, bridgeLink); err != nil {
+			return nil, fmt.Errorf("failed to attach VLAN %q to bridge %q: %v", vlanName, bridgeName, err)
+		}
+	}
+
+	hostVethName, err := cniip.RandomVethName()
+	if err != nil {
+		return nil, fmt.Errorf("unable to create temporary name for host veth interface: %v", err)
+	}
+	contVethName, err := cniip.RandomVethName()
+	if err != nil {
+		return nil, fmt.Errorf("unable to create temporary name for container veth interface: %v", err)
+	}
+
+	veth := &netlink.Veth{
+		LinkAttrs: netlink.LinkAttrs{
+			Name:        hostVethName,
+			MTU:         bl.Attrs().MTU,
+			MasterIndex: bl.Attrs().Index,
+		},
+		PeerName: contVethName,
+	}
+	if err := netlink.LinkAdd(veth); err != nil {
+		return nil, err
+	}
+
+	hostVeth, err := netlink.LinkByName(hostVethName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to refetch veth %q: %v", hostVethName, err)
+	}
+	if err = netlink.LinkSetUp(hostVeth); err != nil {
+		return nil, fmt.Errorf("failed to set %q up: %v", hostVethName, err)
+	}
+
+	contVeth, err := netlink.LinkByName(contVethName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to refetch veth %q: %v", contVethName, err)
+	}
+	if err = netlink.LinkSetNsFd(contVeth, int(netns.Fd())); err != nil {
+		return nil, fmt.Errorf("failed to move veth %q to container netns: %v", contVethName, err)
+	}
+
+	if err := netns.Do(func(_ ns.NetNS) error {
+		contVeth, err = netlink.LinkByName(contVeth.Attrs().Name)
+		if err != nil {
+			return fmt.Errorf("failed to lookup %q in %q: %v", contVethName, netns.Path(), err)
+		}
+		if err := netlink.LinkSetName(contVeth, network.Interface.ContainerName); err != nil {
+			return fmt.Errorf("failed to rename link %q to %q: %v", contVethName, network.Interface.ContainerName, err)
+		}
+		contVeth, err = netlink.LinkByName(network.Interface.ContainerName)
+		if err != nil {
+			return fmt.Errorf("failed to lookup %q in %q: %v", network.Interface.ContainerName, netns.Path(), err)
+		}
+		if err = netlink.LinkSetUp(contVeth); err != nil {
+			return fmt.Errorf("failed to set %q up: %v", contVeth.Attrs().Name, err)
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	return contVeth, nil
 }
 
 func physicalSetup(netns ns.NetNS, network *Network) (netlink.Link, error) {
@@ -934,6 +1062,8 @@ func (m *NfvManager) nfvSetup(req *cniserver.PodRequest, pod *kapi.Pod) (bool, c
 		switch net.Interface.Type {
 		case InterfaceTypeVlan:
 			link, err = vlanSetup(netns, net)
+		case InterfaceTypeBridgedVlan:
+			link, err = bridgedVlanSetup(netns, net)
 		case InterfaceTypePhysical:
 			link, err = physicalSetup(netns, net)
 		case InterfaceTypeSRIOV:
