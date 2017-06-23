@@ -801,13 +801,14 @@ func (m *NfvManager) ipamSetupSlaac(containerID string, netns ns.NetNS, containe
 	result := &cnitypes.Result{}
 
 	if err := netns.Do(func(_ ns.NetNS) error {
-		ch := make(chan netlink.AddrUpdate)
-		done := make(chan struct{})
-		defer close(done)
-
-		if err := netlink.AddrSubscribe(ch, done); err != nil {
-			return fmt.Errorf("failed to listen for netlink address events: %v", err)
-		}
+		// SubscribeAt() has a data race that triggers the race detector
+		//ch := make(chan netlink.AddrUpdate)
+		//done := make(chan struct{})
+		//defer close(done)
+		// https://github.com/vishvananda/netlink/issues/240
+		//if err := netlink.AddrSubscribe(ch, done); err != nil {
+		//	return fmt.Errorf("failed to listen for netlink address events: %v", err)
+		//}
 
 		link, err := netlink.LinkByName(containerIfname)
 		if err != nil {
@@ -832,24 +833,44 @@ func (m *NfvManager) ipamSetupSlaac(containerID string, netns ns.NetNS, containe
 
 		// Wait up to 10s for a non-link-local address to show up
 	loop:
-		for {
-			select {
-			case update := <-ch:
-				if update.LinkIndex == link.Attrs().Index &&
-					update.LinkAddress.IP.To4() == nil &&
-					update.NewAddr &&
-					(update.Flags&syscall.IFA_F_TENTATIVE) == 0 &&
-					(update.Flags&syscall.IFA_F_DADFAILED) == 0 &&
-					!update.LinkAddress.IP.IsLinkLocalUnicast() &&
-					!update.LinkAddress.IP.IsLinkLocalMulticast() {
+		for i := 0; i < 100; i++ {
+			// SubscribeAt() has a data race that triggers the race detector
+			// https://github.com/vishvananda/netlink/issues/240
+			//select {
+			//case update := <-ch:
+			//	if update.LinkIndex == link.Attrs().Index &&
+			//		update.LinkAddress.IP.To4() == nil &&
+			//		update.NewAddr &&
+			//		(update.Flags&syscall.IFA_F_TENTATIVE) == 0 &&
+			//		(update.Flags&syscall.IFA_F_DADFAILED) == 0 &&
+			//		!update.LinkAddress.IP.IsLinkLocalUnicast() &&
+			//		!update.LinkAddress.IP.IsLinkLocalMulticast() {
+			//		result.IP6 = &cnitypes.IPConfig{
+			//			IP: update.LinkAddress,
+			//		}
+			//		break loop
+			//	}
+			//case <-time.After(time.Second * 10):
+			//	return fmt.Errorf("timed out waiting for IPv6 SLAAC address")
+			//}
+
+			addrs, err := netlink.AddrList(link, syscall.AF_UNSPEC)
+			if err != nil {
+				return fmt.Errorf("failed to list link %q addresses: %v", containerIfname, err)
+			}
+			for _, addr := range addrs {
+				if addr.IP.To4() == nil &&
+					(addr.Flags&syscall.IFA_F_TENTATIVE) == 0 &&
+					(addr.Flags&syscall.IFA_F_DADFAILED) == 0 &&
+					!addr.IP.IsLinkLocalUnicast() &&
+					!addr.IP.IsLinkLocalMulticast() {
 					result.IP6 = &cnitypes.IPConfig{
-						IP: update.LinkAddress,
+						IP: *addr.IPNet,
 					}
 					break loop
 				}
-			case <-time.After(time.Second * 10):
-				return fmt.Errorf("timed out waiting for IPv6 SLAAC address")
 			}
+			time.Sleep(time.Second / 10)
 		}
 
 		// Look for an IPv6 default route through the container interface,
