@@ -20,15 +20,11 @@ package dockershim
 
 import (
 	"fmt"
-	"strconv"
-	"strings"
 
 	"github.com/blang/semver"
 	dockertypes "github.com/docker/engine-api/types"
 	dockercontainer "github.com/docker/engine-api/types/container"
 	runtimeapi "k8s.io/kubernetes/pkg/kubelet/apis/cri/v1alpha1/runtime"
-
-	sdnapi "github.com/openshift/origin/pkg/sdn/plugin"
 )
 
 func DefaultMemorySwap() int64 {
@@ -52,22 +48,6 @@ func (ds *dockerService) updateCreateConfig(
 	podSandboxID string, securityOptSep rune, apiVersion *semver.Version) error {
 	// Apply Linux-specific options if applicable.
 	if lc := config.GetLinux(); lc != nil {
-		// *** NFV
-		cpus := ""
-		annotations := config.GetAnnotations()
-		if cpuset, ok := annotations[sdnapi.NfvCPUAffinityAnnotation]; ok {
-			sanitized := make([]string, 0, 2)
-			split := strings.Split(cpuset, ",")
-			for _, cpu := range split {
-				num, err := strconv.ParseUint(cpu, 10, 32)
-				if err != nil {
-					return fmt.Errorf("failed to parse CPU affinity annotation '%s': %v", cpuset, err)
-				}
-				sanitized = append(sanitized, fmt.Sprintf("%d", num))
-			}
-			cpus = strings.Join(sanitized, ",")
-		}
-
 		// TODO: Check if the units are correct.
 		// TODO: Can we assume the defaults are sane?
 		rOpts := lc.GetResources()
@@ -78,13 +58,8 @@ func (ds *dockerService) updateCreateConfig(
 				CPUShares:  rOpts.CpuShares,
 				CPUQuota:   rOpts.CpuQuota,
 				CPUPeriod:  rOpts.CpuPeriod,
-				CpusetCpus: cpus,
 			}
 			createConfig.HostConfig.OomScoreAdj = int(rOpts.OomScoreAdj)
-		} else if len(cpus) > 0 {
-			createConfig.HostConfig.Resources = dockercontainer.Resources{
-				CpusetCpus: cpus,
-			}
 		}
 		// Note: ShmSize is handled in kube_docker_client.go
 
@@ -93,6 +68,17 @@ func (ds *dockerService) updateCreateConfig(
 			return fmt.Errorf("failed to apply container security context for container %q: %v", config.Metadata.Name, err)
 		}
 		modifyPIDNamespaceOverrides(ds.disableSharedPID, apiVersion, createConfig.HostConfig)
+	}
+
+	cpuset, numaset, err := ds.cpuManager.Reserve(sandboxConfig.Metadata.Namespace, createConfig.Name, config.GetAnnotations())
+	if err != nil {
+		return err
+	}
+	if cpuset != "" {
+		createConfig.HostConfig.Resources.CpusetCpus = cpuset
+	}
+	if numaset != "" {
+		createConfig.HostConfig.Resources.CpusetMems = numaset
 	}
 
 	// Apply cgroupsParent derived from the sandbox config.

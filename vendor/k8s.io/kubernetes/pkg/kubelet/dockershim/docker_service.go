@@ -45,6 +45,8 @@ import (
 	"k8s.io/kubernetes/pkg/kubelet/util/cache"
 
 	"k8s.io/kubernetes/pkg/kubelet/dockershim/libdocker"
+
+	sdnplugin "github.com/openshift/origin/pkg/sdn/plugin"
 )
 
 const (
@@ -164,6 +166,11 @@ func NewDockerService(client libdocker.Interface, seccompProfileRoot string, pod
 		execHandler = &NativeExecHandler{}
 	}
 
+	cpuManager, err := sdnplugin.NewCPUManager()
+	if err != nil {
+		return nil, err
+	}
+
 	ds := &dockerService{
 		seccompProfileRoot: seccompProfileRoot,
 		client:             c,
@@ -177,6 +184,7 @@ func NewDockerService(client libdocker.Interface, seccompProfileRoot string, pod
 		checkpointHandler: checkpointHandler,
 		disableSharedPID:  disableSharedPID,
 		networkReady:      make(map[string]bool),
+		cpuManager:        cpuManager,
 	}
 
 	// check docker version compatibility.
@@ -272,6 +280,8 @@ type dockerService struct {
 	// See proposals/pod-pid-namespace.md for details.
 	// TODO: Remove once the escape hatch is no longer used (https://issues.k8s.io/41938)
 	disableSharedPID bool
+
+	cpuManager *sdnplugin.CPUManager
 }
 
 // Version returns the runtime name, runtime version and runtime API version

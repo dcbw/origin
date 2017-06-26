@@ -142,6 +142,7 @@ type NfvManager struct {
 	dhcpConfig []byte
 	exec       kexec.Interface
 	DhcpClient *os.Process
+	foo *CPUManager
 }
 
 func NewNfvManager(exec kexec.Interface) *NfvManager {

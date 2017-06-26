@@ -153,6 +153,7 @@ func (ds *dockerService) CreateContainer(podSandboxID string, config *runtimeapi
 
 	securityOpts, err := ds.getSecurityOpts(config.Metadata.Name, sandboxConfig, securityOptSep)
 	if err != nil {
+		ds.cpuManager.Release(createConfig.Name)
 		return "", fmt.Errorf("failed to generate security options for container %q: %v", config.Metadata.Name, err)
 	}
 
@@ -164,8 +165,29 @@ func (ds *dockerService) CreateContainer(podSandboxID string, config *runtimeapi
 	}
 
 	if createResp != nil {
+glog.Warningf("############## reconciling containers")
+		err := ds.cpuManager.Reconcile(sandboxConfig.Metadata.Namespace, createConfig.Name, createResp.ID, func (containerID string, cpus, numas string) error {
+			info, err := ds.client.InspectContainer(containerID)
+			if err != nil {
+				return fmt.Errorf("container %q inspect failure: %v", err)
+			}
+
+			updateConfig := dockercontainer.UpdateConfig{
+				Resources: info.HostConfig.Resources,
+				RestartPolicy: info.HostConfig.RestartPolicy,
+			}
+			if err := ds.client.UpdateContainer(containerID, updateConfig); err != nil {
+				return fmt.Errorf("container %q update failure: %v", err)
+			}
+glog.Warningf("############## reconciling container %q success", containerID)
+			return nil
+		})
+		if err != nil {
+			ds.cpuManager.Release(createConfig.Name)
+		}
 		return createResp.ID, err
 	}
+	ds.cpuManager.Release(createConfig.Name)
 	return "", err
 }
 
