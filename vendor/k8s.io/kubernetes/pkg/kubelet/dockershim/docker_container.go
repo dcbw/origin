@@ -20,8 +20,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"time"
 
 	dockertypes "github.com/docker/engine-api/types"
@@ -32,8 +30,6 @@ import (
 
 	runtimeapi "k8s.io/kubernetes/pkg/kubelet/api/v1alpha1/runtime"
 	"k8s.io/kubernetes/pkg/kubelet/dockertools"
-
-	sdnapi "github.com/openshift/origin/pkg/sdn/plugin"
 )
 
 const (
@@ -142,6 +138,11 @@ func (ds *dockerService) CreateContainer(podSandboxID string, config *runtimeapi
 		},
 	}
 
+	cpuset, numaset, err := ds.cpuManager.Reserve(sandboxConfig.Metadata.Namespace, createConfig.Name, config.GetAnnotations())
+	if err != nil {
+		return "", err
+	}
+
 	// Fill the HostConfig.
 	hc := &dockercontainer.HostConfig{
 		Binds: generateMountBindings(config.GetMounts()),
@@ -149,22 +150,6 @@ func (ds *dockerService) CreateContainer(podSandboxID string, config *runtimeapi
 
 	// Apply Linux-specific options if applicable.
 	if lc := config.GetLinux(); lc != nil {
-		// *** NFV
-		cpus := ""
-		annotations := config.GetAnnotations()
-		if cpuset, ok := annotations[sdnapi.NfvCPUAffinityAnnotation]; ok {
-			sanitized := make([]string, 0, 2)
-			split := strings.Split(cpuset, ",")
-			for _, cpu := range split {
-				num, err := strconv.ParseUint(cpu, 10, 32)
-				if err != nil {
-					return "", fmt.Errorf("failed to parse CPU affinity annotation '%s': %v", cpuset, err)
-				}
-				sanitized = append(sanitized, fmt.Sprintf("%d", num))
-			}
-			cpus = strings.Join(sanitized, ",")
-		}
-
 		// Apply resource options.
 		// TODO: Check if the units are correct.
 		// TODO: Can we assume the defaults are sane?
@@ -176,14 +161,16 @@ func (ds *dockerService) CreateContainer(podSandboxID string, config *runtimeapi
 				CPUShares:  rOpts.CpuShares,
 				CPUQuota:   rOpts.CpuQuota,
 				CPUPeriod:  rOpts.CpuPeriod,
-				CpusetCpus: cpus,
 			}
 			hc.OomScoreAdj = int(rOpts.OomScoreAdj)
-		} else if len(cpus) > 0 {
-			hc.Resources = dockercontainer.Resources{
-				CpusetCpus: cpus,
-			}
 		}
+		if cpuset != "" {
+			hc.Resources.CpusetCpus = cpuset
+		}
+		if numaset != "" {
+			hc.Resources.CpusetMems = numaset
+		}
+
 		// Note: ShmSize is handled in kube_docker_client.go
 
 		// Apply security context.
@@ -195,6 +182,7 @@ func (ds *dockerService) CreateContainer(podSandboxID string, config *runtimeapi
 		// Apply Cgroup options.
 		cgroupParent, err := ds.GenerateExpectedCgroupParent(lc.CgroupParent)
 		if err != nil {
+			ds.cpuManager.Release(createConfig.Name)
 			return "", fmt.Errorf("failed to generate cgroup parent in expected syntax for container %q: %v", config.Metadata.Name, err)
 		}
 		hc.CgroupParent = cgroupParent
@@ -214,6 +202,7 @@ func (ds *dockerService) CreateContainer(podSandboxID string, config *runtimeapi
 	// Apply appArmor and seccomp options.
 	securityOpts, err := getContainerSecurityOpts(config.Metadata.Name, sandboxConfig, ds.seccompProfileRoot, securityOptSep)
 	if err != nil {
+		ds.cpuManager.Release(createConfig.Name)
 		return "", fmt.Errorf("failed to generate container security options for container %q: %v", config.Metadata.Name, err)
 	}
 	hc.SecurityOpt = append(hc.SecurityOpt, securityOpts...)
@@ -225,8 +214,29 @@ func (ds *dockerService) CreateContainer(podSandboxID string, config *runtimeapi
 	}
 
 	if createResp != nil {
+glog.Warningf("############## reconciling containers")
+		err := ds.cpuManager.Reconcile(sandboxConfig.Metadata.Namespace, createConfig.Name, createResp.ID, func (containerID string, cpus, numas string) error {
+			info, err := ds.client.InspectContainer(containerID)
+			if err != nil {
+				return fmt.Errorf("container %q inspect failure: %v", err)
+			}
+
+			updateConfig := dockercontainer.UpdateConfig{
+				Resources: info.HostConfig.Resources,
+				RestartPolicy: info.HostConfig.RestartPolicy,
+			}
+			if err := ds.client.UpdateContainer(containerID, updateConfig); err != nil {
+				return fmt.Errorf("container %q update failure: %v", err)
+			}
+glog.Warningf("############## reconciling container %q success", containerID)
+			return nil
+		})
+		if err != nil {
+			ds.cpuManager.Release(createConfig.Name)
+		}
 		return createResp.ID, err
 	}
+	ds.cpuManager.Release(createConfig.Name)
 	return "", err
 }
 

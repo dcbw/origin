@@ -41,6 +41,8 @@ import (
 	"k8s.io/kubernetes/pkg/kubelet/network/kubenet"
 	"k8s.io/kubernetes/pkg/kubelet/server/streaming"
 	"k8s.io/kubernetes/pkg/kubelet/util/cache"
+
+	sdnplugin "github.com/openshift/origin/pkg/sdn/plugin"
 )
 
 const (
@@ -149,6 +151,10 @@ func NewDockerService(client dockertools.DockerInterface, seccompProfileRoot str
 	if err != nil {
 		return nil, err
 	}
+	cpuManager, err := sdnplugin.NewCPUManager()
+	if err != nil {
+		return nil, err
+	}
 	ds := &dockerService{
 		seccompProfileRoot: seccompProfileRoot,
 		client:             c,
@@ -160,6 +166,7 @@ func NewDockerService(client dockertools.DockerInterface, seccompProfileRoot str
 		},
 		containerManager:  cm.NewContainerManager(cgroupsName, client),
 		checkpointHandler: checkpointHandler,
+		cpuManager: cpuManager,
 	}
 	if streamingConfig != nil {
 		var err error
@@ -238,6 +245,8 @@ type dockerService struct {
 	// version checking for some operations. Use this cache to avoid querying
 	// the docker daemon every time we need to do such checks.
 	versionCache *cache.ObjectCache
+
+	cpuManager *sdnplugin.CPUManager
 }
 
 // Version returns the runtime name, runtime version and runtime API version

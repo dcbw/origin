@@ -142,6 +142,7 @@ type NfvManager struct {
 	exec       kexec.Interface
 	origNS     ns.NetNS
 	DhcpClient *os.Process
+	foo *CPUManager
 }
 
 func NewNfvManager(exec kexec.Interface, origNS ns.NetNS) *NfvManager {
