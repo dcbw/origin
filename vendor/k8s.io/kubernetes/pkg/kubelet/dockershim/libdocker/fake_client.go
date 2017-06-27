@@ -625,6 +625,26 @@ func (f *FakeDockerClient) RemoveContainer(id string, opts dockertypes.Container
 	return fmt.Errorf("container not stopped")
 }
 
+func (f *FakeDockerClient) UpdateContainer(id string, config dockercontainer.UpdateConfig) error {
+	f.Lock()
+	defer f.Unlock()
+	f.appendCalled(calledDetail{name: "update"})
+	err := f.popError("update")
+	if err != nil {
+		return err
+	}
+	f.appendContainerTrace("Update", id)
+
+	container, ok := f.ContainerMap[id]
+	if !ok {
+		return fmt.Errorf("container not found")
+	}
+	container.ContainerJSONBase.HostConfig.Resources = config.Resources
+	container.ContainerJSONBase.HostConfig.RestartPolicy = config.RestartPolicy
+
+	return nil
+}
+
 // Logs is a test-spy implementation of Interface.Logs.
 // It adds an entry "logs" to the internal method call record.
 func (f *FakeDockerClient) Logs(id string, opts dockertypes.ContainerLogsOptions, sopts StreamOptions) error {
