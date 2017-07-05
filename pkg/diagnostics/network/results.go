@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"time"
 
 	"github.com/openshift/source-to-image/pkg/tar"
 	s2ifs "github.com/openshift/source-to-image/pkg/util/fs"
@@ -128,7 +129,7 @@ func (d *NetworkDiagnostic) getNetworkPodLogs(pod *kapi.Pod) error {
 		LimitBytes: &bytelim,
 	}
 
-	req, err := d.Factory.LogsForObject(pod, opts)
+	req, err := d.Factory.LogsForObject(pod, opts, 1*time.Minute)
 	if err != nil {
 		return fmt.Errorf("Request for network diagnostic pod on node %q failed unexpectedly: %v", pod.Spec.NodeName, err)
 	}
