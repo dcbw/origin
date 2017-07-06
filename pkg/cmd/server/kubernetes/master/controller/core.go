@@ -60,7 +60,7 @@ func (c *SchedulerControllerConfig) RunController(ctx kubecontroller.ControllerC
 	config.Recorder = eventcast.NewRecorder(kapi.Scheme, kclientv1.EventSource{Component: kapi.DefaultSchedulerName})
 	eventcast.StartRecordingToSink(&kv1core.EventSinkImpl{Interface: kv1core.New(c.PrivilegedClient.CoreV1().RESTClient()).Events("")})
 
-	s := scheduler.New(config)
+	s := scheduler.NewFromConfig(config)
 	go s.Run()
 
 	return true, nil
