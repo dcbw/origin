@@ -15,6 +15,7 @@ oadm-config-delete-cluster.1
 oadm-config-delete-context.1
 oadm-config-get-clusters.1
 oadm-config-get-contexts.1
+oadm-config-rename-context.1
 oadm-config-set-cluster.1
 oadm-config-set-context.1
 oadm-config-set-credentials.1

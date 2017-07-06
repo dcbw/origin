@@ -15,6 +15,7 @@ oc-adm-config-delete-cluster.1
 oc-adm-config-delete-context.1
 oc-adm-config-get-clusters.1
 oc-adm-config-get-contexts.1
+oc-adm-config-rename-context.1
 oc-adm-config-set-cluster.1
 oc-adm-config-set-context.1
 oc-adm-config-set-credentials.1
@@ -97,6 +98,7 @@ oc-adm-uncordon.1
 oc-adm-verify-image-signature.1
 oc-adm.1
 oc-annotate.1
+oc-apply-edit-last-applied.1
 oc-apply-set-last-applied.1
 oc-apply-view-last-applied.1
 oc-apply.1
@@ -117,6 +119,7 @@ oc-config-delete-cluster.1
 oc-config-delete-context.1
 oc-config-get-clusters.1
 oc-config-get-contexts.1
+oc-config-rename-context.1
 oc-config-set-cluster.1
 oc-config-set-context.1
 oc-config-set-credentials.1
