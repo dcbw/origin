@@ -476,8 +476,6 @@ func (c *NodeConfig) RunProxy() {
 	endpointsConfig.RegisterEventHandler(endpointsHandler)
 	go endpointsConfig.Run(utilwait.NeverStop)
 
-	recorder.Eventf(c.ProxyConfig.NodeRef, kapi.EventTypeNormal, "Starting", "Starting kube-proxy.")
-
 	// periodically sync k8s iptables rules
 	go utilwait.Forever(proxier.SyncLoop, 0)
 	glog.Infof("Started Kubernetes Proxy on %s", c.ProxyConfig.BindAddress)

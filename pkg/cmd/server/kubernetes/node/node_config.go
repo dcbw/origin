@@ -428,12 +428,6 @@ func buildKubeProxyConfig(options configapi.NodeConfig) (*componentconfig.KubePr
 
 	// ConfigSyncPeriod, use default
 
-	// NodeRef, build from config
-	proxyconfig.NodeRef = &kclientv1.ObjectReference{
-		Kind: "Node",
-		Name: options.NodeName,
-	}
-
 	// MasqueradeAll, use default
 
 	// CleanupAndExit, use default
