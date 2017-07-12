@@ -380,11 +380,6 @@ func buildKubeProxyConfig(options configapi.NodeConfig) (*componentconfig.KubePr
 	if err != nil {
 		return nil, err
 	}
-	// Resolve cmd flags to add any user overrides
-	if err := cmdflags.Resolve(options.ProxyArguments, proxyOptions.AddFlags); len(err) > 0 {
-		return nil, kerrors.NewAggregate(err)
-	}
-
 	// get default config
 	proxyconfig := proxyOptions.GetConfig()
 
@@ -411,9 +406,6 @@ func buildKubeProxyConfig(options configapi.NodeConfig) (*componentconfig.KubePr
 	// use the same client as the node
 	proxyconfig.ClientConnection.KubeConfigFile = options.MasterKubeConfig
 
-	// PortRange, use default
-	// HostnameOverride, use default
-
 	// ProxyMode, set to iptables
 	proxyconfig.Mode = "iptables"
 
@@ -425,17 +417,22 @@ func buildKubeProxyConfig(options configapi.NodeConfig) (*componentconfig.KubePr
 	proxyconfig.IPTables.SyncPeriod = metav1.Duration{
 		Duration: syncPeriod,
 	}
+	masqueradeBit := int32(0)
+	proxyconfig.IPTables.MasqueradeBit = &masqueradeBit
 
+	// PortRange, use default
+	// HostnameOverride, use default
 	// ConfigSyncPeriod, use default
-
 	// MasqueradeAll, use default
-
 	// CleanupAndExit, use default
-
 	// KubeAPIQPS, use default, doesn't apply until we build a separate client
 	// KubeAPIBurst, use default, doesn't apply until we build a separate client
-
 	// UDPIdleTimeout, use default
+
+	// Resolve cmd flags to add any user overrides
+	if err := cmdflags.Resolve(options.ProxyArguments, proxyOptions.AddFlags); len(err) > 0 {
+		return nil, kerrors.NewAggregate(err)
+	}
 
 	return proxyconfig, nil
 }
