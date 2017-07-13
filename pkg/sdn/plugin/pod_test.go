@@ -102,7 +102,7 @@ func fakeRunningPod(namespace, name string, ip net.IP) *runningPod {
 	return &runningPod{podPortMapping: podPortMapping, vnid: 0}
 }
 
-func (pt *podTester) setup(req *cniserver.PodRequest) (*cnitypes.Result, *runningPod, error) {
+func (m *podManager) setup(req *cniserver.PodRequest) (cnitypes.Result, *runningPod, error) {
 	pod, err := pt.getExpectedPod(req.PodNamespace, req.PodName, req.Command)
 	if err != nil {
 		return nil, nil, err
