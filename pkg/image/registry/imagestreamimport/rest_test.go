@@ -18,7 +18,7 @@ func (_ fakeImageCreater) New() runtime.Object {
 	return nil
 }
 
-func (_ fakeImageCreater) Create(ctx apirequest.Context, obj runtime.Object) (runtime.Object, error) {
+func (_ fakeImageCreater) Create(ctx apirequest.Context, obj runtime.Object, _ bool) (runtime.Object, error) {
 	return obj, nil
 }
 

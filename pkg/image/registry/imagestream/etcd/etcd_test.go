@@ -65,7 +65,7 @@ func validImageStream() *imageapi.ImageStream {
 
 func create(t *testing.T, storage *REST, obj *imageapi.ImageStream) *imageapi.ImageStream {
 	ctx := apirequest.WithUser(apirequest.NewDefaultContext(), &fakeUser{})
-	newObj, err := storage.Create(ctx, obj)
+	newObj, err := storage.Create(ctx, obj, false)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
