@@ -98,7 +98,7 @@ To ensure it is not failing to run, check the status and logs with:
   # journalctl -ru %[1]s`
 
 	sdUnitReqLoaded = `
-systemd unit %[1]s depends on unit %[2]s, which is not loaded.
+systemd unit %[1]s depends on unit %[2]s, which is not loaded.  %[3]s
 %[3]s
 An administrator probably needs to install the %[2]s unit with:
 
@@ -110,7 +110,7 @@ If it is already installed, you may to reload the definition with:
   `
 
 	sdUnitReqActive = `
-systemd unit %[1]s is running but %[2]s is not.
+systemd unit %[1]s is running but %[2]s is not.  %[3]s
 %[1]s
 An administrator can start the %[2]s unit with:
 
