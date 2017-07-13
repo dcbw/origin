@@ -66,7 +66,7 @@ func SetDefaults_MasterConfig(obj *MasterConfig) {
 	if obj.MasterClients.OpenShiftLoopbackClientConnectionOverrides.Burst <= 0 {
 		obj.MasterClients.OpenShiftLoopbackClientConnectionOverrides.Burst = 300
 	}
-	setDefaults_ClientConnectionOverrides(obj.MasterClients.OpenShiftLoopbackClientConnectionOverrides)
+	SetDefaults_ClientConnectionOverrides(obj.MasterClients.OpenShiftLoopbackClientConnectionOverrides)
 
 	if obj.MasterClients.ExternalKubernetesClientConnectionOverrides == nil {
 		obj.MasterClients.ExternalKubernetesClientConnectionOverrides = &ClientConnectionOverrides{}
@@ -78,7 +78,7 @@ func SetDefaults_MasterConfig(obj *MasterConfig) {
 	if obj.MasterClients.ExternalKubernetesClientConnectionOverrides.Burst <= 0 {
 		obj.MasterClients.ExternalKubernetesClientConnectionOverrides.Burst = 200
 	}
-	setDefaults_ClientConnectionOverrides(obj.MasterClients.ExternalKubernetesClientConnectionOverrides)
+	SetDefaults_ClientConnectionOverrides(obj.MasterClients.ExternalKubernetesClientConnectionOverrides)
 
 	// Populate the new NetworkConfig.ServiceNetworkCIDR field from the KubernetesMasterConfig.ServicesSubnet field if needed
 	if len(obj.NetworkConfig.ServiceNetworkCIDR) == 0 {
@@ -133,7 +133,7 @@ func SetDefaults_NodeConfig(obj *NodeConfig) {
 			Burst: 20,
 		}
 	}
-	setDefaults_ClientConnectionOverrides(obj.MasterClientConnectionOverrides)
+	SetDefaults_ClientConnectionOverrides(obj.MasterClientConnectionOverrides)
 
 	// Defaults/migrations for NetworkConfig
 	if len(obj.NetworkConfig.NetworkPluginName) == 0 {
@@ -369,9 +369,9 @@ func convert_runtime_RawExtension_To_runtime_Object(in *runtime.RawExtension, ou
 	return extension.Convert_runtime_RawExtension_To_runtime_Object(internal.Scheme, in, out, s)
 }
 
-// setDefaults_ClientConnectionOverrides defaults a client connection to the pre-1.3 settings of
+// SetDefaults_ClientConnectionOverrides defaults a client connection to the pre-1.3 settings of
 // being JSON only. Callers must explicitly opt-in to Protobuf support in 1.3+.
-func setDefaults_ClientConnectionOverrides(overrides *ClientConnectionOverrides) {
+func SetDefaults_ClientConnectionOverrides(overrides *ClientConnectionOverrides) {
 	if len(overrides.AcceptContentTypes) == 0 {
 		overrides.AcceptContentTypes = "application/json"
 	}
