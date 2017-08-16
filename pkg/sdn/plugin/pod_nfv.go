@@ -24,6 +24,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	kapi "k8s.io/kubernetes/pkg/api"
+	kclientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
 	kexec "k8s.io/kubernetes/pkg/util/exec"
 
 	"github.com/containernetworking/cni/pkg/invoke"
@@ -100,7 +101,7 @@ type InterfaceSpec struct {
 	VfMacAddress string `json:"vfMacAddress:omitempty"`
 }
 
-type Network struct {
+type NetworkSpec struct {
 	Addressing IPAM          `json:"addressing"`
 	Interface  InterfaceSpec `json:"interface"`
 }
@@ -137,7 +138,16 @@ type nfvPod struct {
 	containerID string
 }
 
+type NFVNetwork struct {
+	Spec *NetworkSpec `json:"spec,omitempty"`
+}
+
+type NetworkGetter interface {
+	GetNetwork(namespace, name string) (*NFVNetwork, error)
+}
+
 type NfvManager struct {
+	netGetter  NetworkGetter
 	pods       map[string]*nfvPod
 	dhcpConfig []byte
 	exec       kexec.Interface
@@ -145,7 +155,7 @@ type NfvManager struct {
 	foo *CPUManager
 }
 
-func NewNfvManager(exec kexec.Interface) *NfvManager {
+func NewNfvManager(exec kexec.Interface, netGetter NetworkGetter) *NfvManager {
 	type dhcpIPAM struct {
 		Type string `json:"type"`
 		// TODO: clientID somehow
@@ -166,10 +176,37 @@ func NewNfvManager(exec kexec.Interface) *NfvManager {
 	})
 
 	return &NfvManager{
+		netGetter:  netGetter,
 		pods:       make(map[string]*nfvPod),
 		dhcpConfig: dhcpConfig,
 		exec:       exec,
 	}
+}
+
+type liveNetGetter struct {
+	client kclientset.Interface
+}
+
+func newLiveNetGetter(kClient kclientset.Interface) *liveNetGetter {
+	return &liveNetGetter{client: kClient}
+}
+
+func (l *liveNetGetter) GetNetwork(namespace, networkName string) (*NFVNetwork, error) {
+	if l.client == nil {
+		return nil, fmt.Errorf("failed to get network from apiserver: no kube client")
+	}
+
+	netPath := fmt.Sprintf("/apis/alpha.network.openshift.io/v1/namespaces/%s/networks/%s", namespace, networkName)
+	networkJSON, err := l.client.Extensions().RESTClient().Get().AbsPath(netPath).DoRaw()
+	if err != nil {
+		return nil, fmt.Errorf("failed to retrieve network %q at path %q: %v", networkName, netPath, err)
+	}
+	network := &NFVNetwork{}
+	if err := json.Unmarshal(networkJSON, &network); err != nil {
+		return nil, fmt.Errorf("failed to parse network %q data %q: %v", networkName, string(networkJSON), err)
+	}
+
+	return network, nil
 }
 
 func podWantsSDN(annotations *map[string]string) bool {
@@ -181,20 +218,20 @@ func podWantsSDN(annotations *map[string]string) bool {
 	return true
 }
 
-func findPhysdev(network *Network) (netlink.Link, error) {
+func findPhysdev(network *NFVNetwork) (netlink.Link, error) {
 	links, err := netlink.LinkList()
 	if err != nil {
 		return nil, fmt.Errorf("failed to list node links: %v", err)
 	}
 
-	if len(network.Interface.Ifname) > 0 {
-		if m, err := netlink.LinkByName(network.Interface.Ifname); err == nil {
+	if len(network.Spec.Interface.Ifname) > 0 {
+		if m, err := netlink.LinkByName(network.Spec.Interface.Ifname); err == nil {
 			return m, nil
 		}
-	} else if len(network.Interface.MacAddress) > 0 {
-		hwAddr, err := net.ParseMAC(network.Interface.MacAddress)
+	} else if len(network.Spec.Interface.MacAddress) > 0 {
+		hwAddr, err := net.ParseMAC(network.Spec.Interface.MacAddress)
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse MAC address %q: %v", network.Interface.MacAddress, err)
+			return nil, fmt.Errorf("failed to parse MAC address %q: %v", network.Spec.Interface.MacAddress, err)
 		}
 
 		for _, link := range links {
@@ -202,11 +239,11 @@ func findPhysdev(network *Network) (netlink.Link, error) {
 				return link, nil
 			}
 		}
-	} else if len(network.Interface.KernelPath) > 0 {
-		if !filepath.IsAbs(network.Interface.KernelPath) || !strings.HasPrefix(network.Interface.KernelPath, "/sys/devices/") {
-			return nil, fmt.Errorf("kernel device path %q must be absolute and begin with /sys/devices/", network.Interface.KernelPath)
+	} else if len(network.Spec.Interface.KernelPath) > 0 {
+		if !filepath.IsAbs(network.Spec.Interface.KernelPath) || !strings.HasPrefix(network.Spec.Interface.KernelPath, "/sys/devices/") {
+			return nil, fmt.Errorf("kernel device path %q must be absolute and begin with /sys/devices/", network.Spec.Interface.KernelPath)
 		}
-		netDir := filepath.Join(network.Interface.KernelPath, "net")
+		netDir := filepath.Join(network.Spec.Interface.KernelPath, "net")
 		files, err := ioutil.ReadDir(netDir)
 		if err != nil {
 			return nil, fmt.Errorf("failed to find network devices at %q", netDir)
@@ -250,7 +287,7 @@ func ifaceRename(oldName, newName string, netns ns.NetNS) (netlink.Link, error) 
 	return newLink, nil
 }
 
-func vlanSetup(netns ns.NetNS, network *Network) (netlink.Link, error) {
+func vlanSetup(netns ns.NetNS, network *NFVNetwork) (netlink.Link, error) {
 	master, err := findPhysdev(network)
 	if err != nil {
 		return nil, err
@@ -267,24 +304,24 @@ func vlanSetup(netns ns.NetNS, network *Network) (netlink.Link, error) {
 			ParentIndex: master.Attrs().Index,
 			Namespace:   netlink.NsFd(int(netns.Fd())),
 		},
-		VlanId: int(network.Interface.VlanID),
+		VlanId: int(network.Spec.Interface.VlanID),
 	}
 
 	if err := netlink.LinkAdd(v); err != nil {
 		return nil, fmt.Errorf("failed to create vlan: %v", err)
 	}
 
-	return ifaceRename(tmpName, network.Interface.ContainerName, netns)
+	return ifaceRename(tmpName, network.Spec.Interface.ContainerName, netns)
 }
 
-func bridgedVlanSetup(netns ns.NetNS, network *Network) (netlink.Link, error) {
+func bridgedVlanSetup(netns ns.NetNS, network *NFVNetwork) (netlink.Link, error) {
 	master, err := findPhysdev(network)
 	if err != nil {
 		return nil, err
 	}
 
 	// find an existing bridge
-	bridgeName := fmt.Sprintf("br-vlan%d", network.Interface.VlanID)
+	bridgeName := fmt.Sprintf("br-vlan%d", network.Spec.Interface.VlanID)
 	bl, _ := netlink.LinkByName(bridgeName)
 	if bl != nil {
 		if _, ok := bl.(*netlink.Bridge); !ok {
@@ -292,7 +329,7 @@ func bridgedVlanSetup(netns ns.NetNS, network *Network) (netlink.Link, error) {
 		}
 	} else {
 		// or make a new one
-		vlanName := fmt.Sprintf("%s.%d", master.Attrs().Name, network.Interface.VlanID)
+		vlanName := fmt.Sprintf("%s.%d", master.Attrs().Name, network.Spec.Interface.VlanID)
 
 		// Create the vlan interface and attach it to the bridge
 		v := &netlink.Vlan{
@@ -300,7 +337,7 @@ func bridgedVlanSetup(netns ns.NetNS, network *Network) (netlink.Link, error) {
 				Name:        vlanName,
 				ParentIndex: master.Attrs().Index,
 			},
-			VlanId: int(network.Interface.VlanID),
+			VlanId: int(network.Spec.Interface.VlanID),
 		}
 
 		if err := netlink.LinkAdd(v); err != nil {
@@ -382,12 +419,12 @@ func bridgedVlanSetup(netns ns.NetNS, network *Network) (netlink.Link, error) {
 		if err != nil {
 			return fmt.Errorf("failed to lookup %q in %q: %v", contVethName, netns.Path(), err)
 		}
-		if err := netlink.LinkSetName(contVeth, network.Interface.ContainerName); err != nil {
-			return fmt.Errorf("failed to rename link %q to %q: %v", contVethName, network.Interface.ContainerName, err)
+		if err := netlink.LinkSetName(contVeth, network.Spec.Interface.ContainerName); err != nil {
+			return fmt.Errorf("failed to rename link %q to %q: %v", contVethName, network.Spec.Interface.ContainerName, err)
 		}
-		contVeth, err = netlink.LinkByName(network.Interface.ContainerName)
+		contVeth, err = netlink.LinkByName(network.Spec.Interface.ContainerName)
 		if err != nil {
-			return fmt.Errorf("failed to lookup %q in %q: %v", network.Interface.ContainerName, netns.Path(), err)
+			return fmt.Errorf("failed to lookup %q in %q: %v", network.Spec.Interface.ContainerName, netns.Path(), err)
 		}
 		if err = netlink.LinkSetUp(contVeth); err != nil {
 			return fmt.Errorf("failed to set %q up: %v", contVeth.Attrs().Name, err)
@@ -400,7 +437,7 @@ func bridgedVlanSetup(netns ns.NetNS, network *Network) (netlink.Link, error) {
 	return contVeth, nil
 }
 
-func physicalSetup(netns ns.NetNS, network *Network) (netlink.Link, error) {
+func physicalSetup(netns ns.NetNS, network *NFVNetwork) (netlink.Link, error) {
 	master, err := findPhysdev(network)
 	if err != nil {
 		return nil, err
@@ -410,7 +447,7 @@ func physicalSetup(netns ns.NetNS, network *Network) (netlink.Link, error) {
 		return nil, err
 	}
 
-	return ifaceRename(master.Attrs().Name, network.Interface.ContainerName, netns)
+	return ifaceRename(master.Attrs().Name, network.Spec.Interface.ContainerName, netns)
 }
 
 func vfnToLink(master netlink.Link, links []netlink.Link, vfn string) (netlink.Link, error) {
@@ -457,14 +494,14 @@ func vfSetDynamic(link netlink.Link, dynamic bool) error {
 	return nil
 }
 
-func sriovGetVf(master netlink.Link, network *Network) (netlink.Link, uint, error) {
+func sriovGetVf(master netlink.Link, network *NFVNetwork) (netlink.Link, uint, error) {
 	links, err := netlink.LinkList()
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to list node links: %v", err)
 	}
 
-	if network.Interface.VfIndex >= 0 {
-		vfn := fmt.Sprintf("virtfn%d", network.Interface.VfIndex)
+	if network.Spec.Interface.VfIndex >= 0 {
+		vfn := fmt.Sprintf("virtfn%d", network.Spec.Interface.VfIndex)
 		vf, err := vfnToLink(master, links, vfn)
 		if err != nil {
 			return nil, 0, err
@@ -477,11 +514,11 @@ func sriovGetVf(master netlink.Link, network *Network) (netlink.Link, uint, erro
 			return nil, 0, fmt.Errorf("SRIOV VF %q is already in-use by a container", vf.Attrs().Name)
 		}
 
-		return vf, uint(network.Interface.VfIndex), nil
+		return vf, uint(network.Spec.Interface.VfIndex), nil
 	}
 
 	// Otherwise find a free VF
-	masterPath := fmt.Sprintf("/sys/class/net/%s/device", master.Attrs().Name, network.Interface.VfIndex)
+	masterPath := fmt.Sprintf("/sys/class/net/%s/device", master.Attrs().Name, network.Spec.Interface.VfIndex)
 	files, err := ioutil.ReadDir(masterPath)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to read master net device directory %q", masterPath)
@@ -520,7 +557,7 @@ func sriovGetVf(master netlink.Link, network *Network) (netlink.Link, uint, erro
 	return nil, 0, fmt.Errorf("failed to find a free SRIOV VF of %q", master.Attrs().Name)
 }
 
-func sriovSetup(netns ns.NetNS, network *Network) (netlink.Link, error) {
+func sriovSetup(netns ns.NetNS, network *NFVNetwork) (netlink.Link, error) {
 	master, err := findPhysdev(network)
 	if err != nil {
 		return nil, err
@@ -536,18 +573,18 @@ func sriovSetup(netns ns.NetNS, network *Network) (netlink.Link, error) {
 		return nil, err
 	}
 
-	if err := netlink.LinkSetVfVlan(master, int(vfidx), int(network.Interface.VfVlan)); err != nil {
-		return nil, fmt.Errorf("failed to SRIOV VF %q VLAN to %d: %v", vf.Attrs().Name, network.Interface.VfVlan, err)
+	if err := netlink.LinkSetVfVlan(master, int(vfidx), int(network.Spec.Interface.VfVlan)); err != nil {
+		return nil, fmt.Errorf("failed to SRIOV VF %q VLAN to %d: %v", vf.Attrs().Name, network.Spec.Interface.VfVlan, err)
 	}
 
-	if network.Interface.VfMacAddress != "" {
-		hwaddr, err := net.ParseMAC(network.Interface.VfMacAddress)
+	if network.Spec.Interface.VfMacAddress != "" {
+		hwaddr, err := net.ParseMAC(network.Spec.Interface.VfMacAddress)
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse SRIOV VF %q MAC address %q: %v", vf.Attrs().Name, network.Interface.VfMacAddress, err)
+			return nil, fmt.Errorf("failed to parse SRIOV VF %q MAC address %q: %v", vf.Attrs().Name, network.Spec.Interface.VfMacAddress, err)
 		}
 
 		if err := netlink.LinkSetVfHardwareAddr(master, int(vfidx), hwaddr); err != nil {
-			return nil, fmt.Errorf("failed to SRIOV VF %q MAC address to %q: %v", vf.Attrs().Name, network.Interface.VfMacAddress, err)
+			return nil, fmt.Errorf("failed to SRIOV VF %q MAC address to %q: %v", vf.Attrs().Name, network.Spec.Interface.VfMacAddress, err)
 		}
 	}
 
@@ -555,7 +592,7 @@ func sriovSetup(netns ns.NetNS, network *Network) (netlink.Link, error) {
 		return nil, err
 	}
 
-	return ifaceRename(vf.Attrs().Name, network.Interface.ContainerName, netns)
+	return ifaceRename(vf.Attrs().Name, network.Spec.Interface.ContainerName, netns)
 }
 
 // Parses a CIDR and a gateway IP address and returns (a) a CIDR consisting of the
@@ -932,13 +969,14 @@ func (m *NfvManager) ipamSetup(containerID string, netns ns.NetNS, ipam IPAM, li
 	return result, nil
 }
 
-func getPodNetworksAndChains(annotations *map[string]string) (map[string]*Network, []*ServiceFunctionChain, error) {
-	networks := map[string]*Network{}
+func (m *NfvManager) getPodNetworksAndChains(annotations *map[string]string) (map[string]*NFVNetwork, []*ServiceFunctionChain, error) {
+	networks := map[string]*NFVNetwork{}
 	chains := []*ServiceFunctionChain{}
 
 	val, ok := (*annotations)[NfvNetworksAnnotation]
 	if ok && len(val) > 0 {
-		if err := json.Unmarshal([]byte(val), &networks); err != nil {
+		netNames := make([]string, 0)
+		if err := json.Unmarshal([]byte(val), &netNames); err != nil {
 			return nil, nil, fmt.Errorf("error parsing NFV network annotation JSON: %v", err)
 		}
 	}
@@ -1042,7 +1080,7 @@ func (m *NfvManager) setupChainFrom(fromPod *nfvPod, toNetns ns.NetNS, chain *Se
 func (m *NfvManager) nfvSetup(req *cniserver.PodRequest, pod *kapi.Pod) (bool, cnitypes.Result, error) {
 	doSDN := podWantsSDN(&pod.Annotations)
 
-	networks, chains, err := getPodNetworksAndChains(&pod.Annotations)
+	networks, chains, err := m.getPodNetworksAndChains(&pod.Annotations)
 	if err != nil {
 		return false, nil, err
 	}
@@ -1081,7 +1119,7 @@ func (m *NfvManager) nfvSetup(req *cniserver.PodRequest, pod *kapi.Pod) (bool, c
 		net := networks[name]
 
 		// set up the interface in the container netns
-		switch net.Interface.Type {
+		switch net.Spec.Interface.Type {
 		case InterfaceTypeVlan:
 			link, err = vlanSetup(netns, net)
 		case InterfaceTypeBridgedVlan:
@@ -1091,7 +1129,7 @@ func (m *NfvManager) nfvSetup(req *cniserver.PodRequest, pod *kapi.Pod) (bool, c
 		case InterfaceTypeSRIOV:
 			link, err = sriovSetup(netns, net)
 		default:
-			return false, nil, fmt.Errorf("invalid NFV interface type %s", net.Interface.Type)
+			return false, nil, fmt.Errorf("invalid NFV interface type %s", net.Spec.Interface.Type)
 		}
 
 		if err != nil {
@@ -1099,7 +1137,7 @@ func (m *NfvManager) nfvSetup(req *cniserver.PodRequest, pod *kapi.Pod) (bool, c
 		}
 
 		// set up IPAM on the container interface
-		result, err := m.ipamSetup(req.SandboxID, netns, net.Addressing, link)
+		result, err := m.ipamSetup(req.SandboxID, netns, net.Spec.Addressing, link)
 		if err != nil {
 			return false, nil, err
 		}
@@ -1133,7 +1171,7 @@ func (m *NfvManager) nfvSetup(req *cniserver.PodRequest, pod *kapi.Pod) (bool, c
 		}
 
 		// Does the other pod select this pod in a chain?
-		_, chains, err := getPodNetworksAndChains(&otherPod.annotations)
+		_, chains, err := m.getPodNetworksAndChains(&otherPod.annotations)
 		if err != nil {
 			continue
 		}
@@ -1157,8 +1195,8 @@ func (m *NfvManager) nfvUpdate(req *cniserver.PodRequest, pod *kapi.Pod) (bool, 
 	return podWantsSDN(&pod.Annotations), nil
 }
 
-func (m *NfvManager) dhcpTeardown(req *cniserver.PodRequest, network *Network, netns ns.NetNS) error {
-	args := createDHCPArgs(req.SandboxID, netns, network.Interface.ContainerName, cniserver.CNI_DEL)
+func (m *NfvManager) dhcpTeardown(req *cniserver.PodRequest, network *NFVNetwork, netns ns.NetNS) error {
+	args := createDHCPArgs(req.SandboxID, netns, network.Spec.Interface.ContainerName, cniserver.CNI_DEL)
 	err := invoke.ExecPluginWithoutResult("/opt/cni/bin/dhcp", m.dhcpConfig, args)
 	if err != nil {
 		if netns != nil {
@@ -1172,9 +1210,9 @@ func (m *NfvManager) dhcpTeardown(req *cniserver.PodRequest, network *Network, n
 	return nil
 }
 
-func (m *NfvManager) sriovTeardown(network *Network, netns ns.NetNS) error {
+func (m *NfvManager) sriovTeardown(network *NFVNetwork, netns ns.NetNS) error {
 	if netns != nil {
-		linkName := network.Interface.ContainerName
+		linkName := network.Spec.Interface.ContainerName
 		if err := netns.Do(func(_ ns.NetNS) error {
 			vf, err := netlink.LinkByName(linkName)
 			if err != nil {
@@ -1199,7 +1237,7 @@ func (m *NfvManager) nfvTeardown(req *cniserver.PodRequest, netnsValid bool) (bo
 	}
 
 	hasSDN := podWantsSDN(&nfvPod.annotations)
-	networks, chains, err := getPodNetworksAndChains(&nfvPod.annotations)
+	networks, chains, err := m.getPodNetworksAndChains(&nfvPod.annotations)
 	if err != nil {
 		return false, err
 	} else if len(networks) == 0 && len(chains) == 0 {
@@ -1217,13 +1255,13 @@ func (m *NfvManager) nfvTeardown(req *cniserver.PodRequest, netnsValid bool) (bo
 	}
 
 	for _, net := range networks {
-		if net.Addressing.Dhcp4 {
+		if net.Spec.Addressing.Dhcp4 {
 			if err := m.dhcpTeardown(req, net, netns); err != nil {
 				glog.Warningf("Failed to tear down DHCP IPAM for %q/%q: %v", req.PodNamespace, req.PodName, err)
 			}
 		}
 
-		if net.Interface.Type == InterfaceTypeSRIOV {
+		if net.Spec.Interface.Type == InterfaceTypeSRIOV {
 			if err := m.sriovTeardown(net, netns); err != nil {
 				glog.Warningf("Failed to tear down SRIOV VF for %q/%q: %v", req.PodNamespace, req.PodName, err)
 			}

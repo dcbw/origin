@@ -62,7 +62,7 @@ func newPodManager(kClient kclientset.Interface, policy osdnPolicy, mtu uint32, 
 	pm.mtu = mtu
 	pm.podHandler = pm
 	pm.ovs = ovs
-	pm.nfvManager = NewNfvManager(kexec.New())
+	pm.nfvManager = NewNfvManager(kexec.New(), newLiveNetGetter(kClient))
 	return pm
 }
 
