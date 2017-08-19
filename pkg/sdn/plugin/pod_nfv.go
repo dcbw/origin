@@ -50,9 +50,10 @@ type IPAddr struct {
 }
 
 type IPAM struct {
-	// "static" config items
-	IPs    []IPAddr `json:"ips,omitempty"`
-	Routes []*Route `json:"routes,omitempty"`
+	// "static" config items; if specified on the pod annotation,
+	// the pod-specific options override these
+	StaticIPs []IPAddr `json:"staticIPs,omitempty"`
+	Routes    []*Route `json:"routes,omitempty"`
 
 	// "dhcpv4" config items
 	Dhcp4    bool   `json:"dhcp4,omitempty"`
@@ -79,17 +80,19 @@ type InterfaceSpec struct {
 	// "sriov" - use a Virtual Function (VF) of a physical NIC
 	Type string `json:"type"`
 
-	// Interface name inside container
-	ContainerName string `json:"containerName"`
+	// Interface name inside container; if specified in the pod annotation,
+	// the pod-specific option overrides this one
+	ContainerName string `json:"containerName,omitempty"`
 
-	// "vlan" options
-	VlanID uint `json:"vlanId,omitempty"`
-
-	// "physical" options
+	// "physical" options; if specified in the pod annotation,
+	// the pod-specific options override these
 	Ifname     string `json:"ifname,omitempty"`
 	MacAddress string `json:"macAddress,omitempty"`
 	// ex: "/sys/devices/pci0000:00/0000:00:19.0"
 	KernelPath string `json:"kernelPath,omitempty"`
+
+	// "vlan" options
+	VlanID uint `json:"vlanId,omitempty"`
 
 	// "sriov" options
 	// index # of the virtual function (VF) to use; if missing the next VF
@@ -138,6 +141,24 @@ type nfvPod struct {
 	containerID string
 }
 
+type NFVNetworkAnnotation struct {
+	// Interface name inside container; this option overrides any generic
+	// option from the network definition
+	ContainerName string `json:"containerName,omitempty"`
+
+	// "static" addressing options; these override any generic options from
+	// the network definition
+	StaticIPs []IPAddr `json:"staticIPs,omitempty"`
+
+	// "physical" options; these override any generic options from
+	// the network definition
+	Ifname     string `json:"ifname,omitempty"`
+	MacAddress string `json:"macAddress,omitempty"`
+	// ex: "/sys/devices/pci0000:00/0000:00:19.0"
+	KernelPath string `json:"kernelPath,omitempty"`
+}
+
+// The actual Network description from a Custom Resource Definition
 type NFVNetwork struct {
 	Spec *NetworkSpec `json:"spec,omitempty"`
 }
@@ -635,7 +656,7 @@ func parseIPAndGateway(cidr, gateway string) (net.IPNet, net.IPNet, net.IP, bool
 func ipamSetupStatic(ipam IPAM, netns ns.NetNS, ifName string) (cnitypes.Result, error) {
 	result := &cnicurrent.Result{}
 
-	for _, ip := range ipam.IPs {
+	for _, ip := range ipam.StaticIPs {
 		addr, _, gw, isV4, err := parseIPAndGateway(ip.IP, ip.Gateway)
 		if err != nil {
 			return nil, err
@@ -902,7 +923,7 @@ func (m *NfvManager) ipamSetup(containerID string, netns ns.NetNS, ipam IPAM, li
 
 	result := &cnicurrent.Result{}
 
-	if len(ipam.IPs) > 0 {
+	if len(ipam.StaticIPs) > 0 {
 		tmpResult, err = ipamSetupStatic(ipam, netns, link.Attrs().Name)
 		if err != nil {
 			return nil, err
@@ -969,16 +990,51 @@ func (m *NfvManager) ipamSetup(containerID string, netns ns.NetNS, ipam IPAM, li
 	return result, nil
 }
 
-func (m *NfvManager) getPodNetworksAndChains(annotations *map[string]string) (map[string]*NFVNetwork, []*ServiceFunctionChain, error) {
+// Retrieves all the pod's specified network objects from the Kubernetes API
+// and handles pod-specific overrides
+func (m *NfvManager) getPodNetworksAndChains(podNamespace string, annotations *map[string]string) (map[string]*NFVNetwork, []*ServiceFunctionChain, error) {
 	networks := map[string]*NFVNetwork{}
 	chains := []*ServiceFunctionChain{}
 
+	// Get the network names off the pod
 	val, ok := (*annotations)[NfvNetworksAnnotation]
 	if ok && len(val) > 0 {
-		netNames := make([]string, 0)
-		if err := json.Unmarshal([]byte(val), &netNames); err != nil {
+		podNetworks := make(map[string]*NFVNetworkAnnotation, 0)
+		if err := json.Unmarshal([]byte(val), &podNetworks); err != nil {
 			return nil, nil, fmt.Errorf("error parsing NFV network annotation JSON: %v", err)
 		}
+
+		// Get the networks from Kubernetes
+		for name, podNet := range podNetworks {
+			network, err := m.netGetter.GetNetwork(podNamespace, name)
+			if err != nil {
+				return nil, nil, err
+			}
+
+			// Handle overrides
+			if len(podNet.StaticIPs) > 0 {
+				network.Spec.Addressing.StaticIPs = podNet.StaticIPs
+			}
+			if podNet.Ifname != "" {
+				network.Spec.Interface.Ifname = podNet.Ifname
+			}
+			if podNet.MacAddress != "" {
+				network.Spec.Interface.MacAddress = podNet.MacAddress
+			}
+			if podNet.KernelPath != "" {
+				network.Spec.Interface.KernelPath = podNet.KernelPath
+			}
+			if podNet.ContainerName != "" {
+				network.Spec.Interface.ContainerName = podNet.ContainerName
+			}
+
+			if network.Spec.Interface.ContainerName == "" {
+				return nil, nil, fmt.Errorf("error building NFV network %q: no containerIfname specified in Pod annotation or Network definition")
+			}
+
+			networks[name] = network
+		}
+
 	}
 
 	val, ok = (*annotations)[NfvServiceFunctionChainAnnotation]
@@ -1080,7 +1136,7 @@ func (m *NfvManager) setupChainFrom(fromPod *nfvPod, toNetns ns.NetNS, chain *Se
 func (m *NfvManager) nfvSetup(req *cniserver.PodRequest, pod *kapi.Pod) (bool, cnitypes.Result, error) {
 	doSDN := podWantsSDN(&pod.Annotations)
 
-	networks, chains, err := m.getPodNetworksAndChains(&pod.Annotations)
+	networks, chains, err := m.getPodNetworksAndChains(req.PodNamespace, &pod.Annotations)
 	if err != nil {
 		return false, nil, err
 	}
@@ -1171,7 +1227,7 @@ func (m *NfvManager) nfvSetup(req *cniserver.PodRequest, pod *kapi.Pod) (bool, c
 		}
 
 		// Does the other pod select this pod in a chain?
-		_, chains, err := m.getPodNetworksAndChains(&otherPod.annotations)
+		_, chains, err := m.getPodNetworksAndChains(req.PodNamespace, &otherPod.annotations)
 		if err != nil {
 			continue
 		}
@@ -1237,7 +1293,7 @@ func (m *NfvManager) nfvTeardown(req *cniserver.PodRequest, netnsValid bool) (bo
 	}
 
 	hasSDN := podWantsSDN(&nfvPod.annotations)
-	networks, chains, err := m.getPodNetworksAndChains(&nfvPod.annotations)
+	networks, chains, err := m.getPodNetworksAndChains(req.PodNamespace, &nfvPod.annotations)
 	if err != nil {
 		return false, err
 	} else if len(networks) == 0 && len(chains) == 0 {

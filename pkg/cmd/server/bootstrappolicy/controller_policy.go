@@ -256,6 +256,8 @@ func init() {
 			rbac.NewRule("get", "list").Groups(kapiGroup).Resources("pods").RuleOrDie(),
 			rbac.NewRule("get", "list", "watch").Groups(kapiGroup).Resources("services").RuleOrDie(),
 			rbac.NewRule("get", "list", "watch").Groups(kapiGroup).Resources("namespaces").RuleOrDie(),
+			rbac.NewRule("get", "list", "watch").Groups(apiExtensionsGroup).Resources("customresourcedefinitions", "customresourcedefinitions/status").RuleOrDie(),
+			rbac.NewRule("get", "list", "watch").Groups("alpha.network.openshift.io").Resources("networks").RuleOrDie(),
 			rbac.NewRule("get", "list", "watch").Groups(kapiGroup).Resources("nodes").RuleOrDie(),
 			rbac.NewRule("update").Groups(kapiGroup).Resources("nodes/status").RuleOrDie(),
 

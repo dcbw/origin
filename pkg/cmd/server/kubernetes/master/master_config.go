@@ -343,6 +343,7 @@ func BuildControllerManagerServer(masterConfig configapi.MasterConfig) (*cmapp.C
 		componentconfig.GroupResource{Group: "network.openshift.io", Resource: "egressnetworkpolicies"},
 		componentconfig.GroupResource{Group: "network.openshift.io", Resource: "hostsubnets"},
 		componentconfig.GroupResource{Group: "network.openshift.io", Resource: "netnamespaces"},
+		componentconfig.GroupResource{Group: "alpha.network.openshift.io", Resource: "networks"},
 		componentconfig.GroupResource{Group: "oauth.openshift.io", Resource: "oauthclientauthorizations"},
 		componentconfig.GroupResource{Group: "oauth.openshift.io", Resource: "oauthclients"},
 		componentconfig.GroupResource{Group: "quota.openshift.io", Resource: "clusterresourcequotas"},
