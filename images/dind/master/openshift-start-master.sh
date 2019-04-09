@@ -3,6 +3,7 @@
 set -o errexit
 set -o nounset
 set -o pipefail
+set -x
 
 # Should set OPENSHIFT_NETWORK_PLUGIN
 source /data/dind-env
