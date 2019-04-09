@@ -21,6 +21,10 @@ function start-cluster-network-operator() {
   os::util::wait-for-condition "master node" "${condition}"
   /usr/local/bin/oc --config="${kubeconfig}" label --overwrite node openshift-master-node node-role.kubernetes.io/master=""
 
+  if ! oc --config="${kubeconfig}" get crd networks.config.openshift.io; then
+    /usr/local/bin/oc --config="${kubeconfig}" create -f "/var/lib/networks.config.openshift.io-crd.yaml"
+  fi
+
   local cno_path="${config_path}/cluster-network-operator"
   if ! oc --config="${kubeconfig}" get namespace openshift-network-operator; then
     /usr/local/bin/oc --config="${kubeconfig}" create -f "${cno_path}/manifests/0000_07_cluster-network-operator_00_namespace.yaml"
