@@ -40,3 +40,4 @@ COPY cluster-network-operator.sh /usr/local/bin/
 COPY cluster-network-operator.service /etc/systemd/system/
 RUN systemctl enable cluster-network-operator.service
 
+COPY network.config.openshift.io.yaml /var/lib/
