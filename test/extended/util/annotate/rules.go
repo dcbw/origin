@@ -203,6 +203,8 @@ var (
 			// https://github.com/ovn-org/ovn-kubernetes/issues/928
 			`\[sig-network\] Services should be rejected when no endpoints exist`,
 			`\[cli\] oc explain networking types should contain proper fields description for special networking types`,
+			// https://issues.redhat.com/browse/SDN-912
+			`\[sig-instrumentation\] Prometheus when installed on the cluster should start and expose a secured proxy and unsecured metrics`,
 		},
 		"[Suite:openshift/scalability]": {},
 		// tests that replace the old test-cmd script
